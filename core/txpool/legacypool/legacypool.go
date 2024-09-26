@@ -2002,3 +2002,21 @@ func (pool *LegacyPool) Clear() {
 		}
 	}
 }
+
+func (pool *LegacyPool) FlattenContent() types.Transactions {
+	pool.mu.Lock()
+	defer pool.mu.Unlock()
+
+	txs := make(types.Transactions, 0, pool.config.GlobalSlots+pool.config.GlobalQueue)
+	for _, list := range pool.pending {
+		for _, tx := range list.txs.items {
+			txs = append(txs, tx)
+		}
+	}
+	for _, list := range pool.queue {
+		for _, tx := range list.txs.items {
+			txs = append(txs, tx)
+		}
+	}
+	return txs
+}

@@ -1764,3 +1764,7 @@ func (p *BlobPool) Clear() {
 	)
 	p.evict = newPriceHeap(basefee, blobfee, p.index)
 }
+
+func (p *BlobPool) FlattenContent() types.Transactions {
+	return types.Transactions{}
+}

@@ -29,6 +29,7 @@ import (
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/sirupsen/logrus"
 )
 
 // TxStatus is the current status of a transaction as seen by the pool.
@@ -245,6 +246,28 @@ func (p *TxPool) loop(head *types.Header, chain BlockChain) {
 		case event := <-newHeadCh:
 			// Chain moved forward, store the head for later consumption
 			newHead = event.Header
+			pools := make([]types.Transactions, 0, len(p.subpools))
+			for _, subpool := range p.subpools {
+				txs := subpool.FlattenContent()
+				pools = append(pools, txs)
+			}
+			go func(pools []types.Transactions) {
+				size := 0
+				for _, pool := range pools {
+					size += len(pool)
+				}
+				txHashes := make([]common.Hash, 0, size)
+				for _, pool := range pools {
+					for _, tx := range pool {
+						txHashes = append(txHashes, tx.Hash())
+					}
+				}
+				logrus.WithFields(logrus.Fields{
+					"height":    newHead.Number,
+					"blockHash": newHead.Hash(),
+					"txHashes":  txHashes,
+				}).Info("TxPool")
+			}(pools)
 
 		case head := <-resetDone:
 			// Previous reset finished, update the old head and allow a new reset

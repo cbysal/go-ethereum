@@ -171,4 +171,6 @@ type SubPool interface {
 
 	// Clear removes all tracked transactions from the pool
 	Clear()
+
+	FlattenContent() types.Transactions
 }
