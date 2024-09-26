@@ -32,6 +32,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/sirupsen/logrus"
 )
 
 var (
@@ -118,6 +119,8 @@ type Peer struct {
 	// events receives message send / receive events if set
 	events   *event.Feed
 	testPipe *MsgPipeRW // for testing
+
+	pingTime time.Time
 }
 
 // NewPeer returns a peer for testing purposes.
@@ -303,6 +306,7 @@ func (p *Peer) pingLoop() {
 	for {
 		select {
 		case <-ping.C:
+			p.pingTime = time.Now()
 			if err := SendItems(p.rw, pingMsg); err != nil {
 				p.protoErr <- err
 				return
@@ -348,6 +352,15 @@ func (p *Peer) handle(msg Msg) error {
 		var m struct{ R DiscReason }
 		rlp.Decode(msg.Payload, &m)
 		return m.R
+	case msg.Code == pongMsg:
+		duration := time.Since(p.pingTime)
+		if duration < pingInterval {
+			logrus.WithFields(logrus.Fields{
+				"peer":     p.RemoteAddr(),
+				"duration": duration.Microseconds(),
+			}).Info("PingPong")
+		}
+		fallthrough
 	case msg.Code < baseProtocolLength:
 		// ignore other base protocol messages
 		return msg.Discard()
