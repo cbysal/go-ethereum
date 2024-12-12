@@ -20,10 +20,12 @@ import (
 	"errors"
 	"fmt"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/sirupsen/logrus"
 )
 
 // ethHandler implements the eth.Backend interface to handle the various network
@@ -58,9 +60,17 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 	// Consume any broadcasts and announces, forwarding the rest to the downloader
 	switch packet := packet.(type) {
 	case *eth.NewPooledTransactionHashesPacket:
+		go logrus.WithField("hashes", packet.Hashes).Info("TxHash")
 		return h.txFetcher.Notify(peer.ID(), packet.Types, packet.Sizes, packet.Hashes)
 
 	case *eth.TransactionsPacket:
+		go func() {
+			hashes := make([]common.Hash, 0, len(*packet))
+			for _, tx := range *packet {
+				hashes = append(hashes, tx.Hash())
+			}
+			logrus.WithField("hashes", hashes).Info("Tx")
+		}()
 		for _, tx := range *packet {
 			if tx.Type() == types.BlobTxType {
 				return errors.New("disallowed broadcast blob transaction")
