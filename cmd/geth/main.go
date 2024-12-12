@@ -277,7 +277,7 @@ func init() {
 }
 
 func main() {
-	file, err := os.OpenFile("monitor.log", os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
+	file, err := os.Create("monitor.log")
 	if err != nil {
 		fmt.Fprintln(os.Stderr, err)
 		os.Exit(1)
