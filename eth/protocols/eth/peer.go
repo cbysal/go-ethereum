@@ -17,15 +17,17 @@
 package eth
 
 import (
-	"math/big"
-	"math/rand"
-	"sync"
-
 	mapset "github.com/deckarep/golang-set/v2"
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/conf"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
+	"math/big"
+	"math/rand"
+	"strconv"
+	"sync"
 )
 
 const (
@@ -279,10 +281,36 @@ func (p *Peer) AsyncSendNewBlockHash(block *types.Block) {
 func (p *Peer) SendNewBlock(block *types.Block, td *big.Int) error {
 	// Mark all the block hash as known, but ensure we don't overflow our limits
 	p.knownBlocks.Add(block.Hash())
-	return p2p.Send(p.rw, NewBlockMsg, &NewBlockPacket{
-		Block: block,
-		TD:    td,
-	})
+	switch p.version {
+	case ETH68:
+		return p2p.Send(p.rw, NewBlockMsg, &NewBlockPacket{
+			Block: block,
+			TD:    td,
+		})
+	case ETH69:
+		compactBlock, err := eccb.NewCompactBlock(block, nil)
+		if err != nil {
+			return err
+		}
+		return p2p.Send(p.rw, NewCompactBlockMsg, &NewCompactBlockPacket{
+			CompactBlock: compactBlock,
+			TD:           td,
+		})
+	case ETH70:
+		knownTxs := p.txpool.GetKnownTxs(block)
+		compactBlock, err := eccb.NewCompactBlock(block, knownTxs)
+		if err != nil {
+			return err
+		}
+		conf.SendBlockCount.Add(1)
+		defer conf.SendBlockCount.Add(-1)
+		return p2p.Send(p.rw, NewCompactBlockMsg, &NewCompactBlockPacket{
+			CompactBlock: compactBlock,
+			TD:           td,
+		})
+	default:
+		panic("Unknown protocol version: " + strconv.FormatUint(uint64(p.version), 10))
+	}
 }
 
 // AsyncSendNewBlock queues an entire block for propagation to a remote peer. If
@@ -456,6 +484,75 @@ func (p *Peer) RequestTxs(hashes []common.Hash) error {
 		RequestId:                    id,
 		GetPooledTransactionsRequest: hashes,
 	})
+}
+
+func (p *Peer) RequestCompactBlock(hash common.Hash, height uint64, sink chan *Response) (*Request, error) {
+	id := rand.Uint64()
+
+	req := &Request{
+		id:   id,
+		sink: sink,
+		code: GetCompactBlockMsg,
+		want: CompactBlockMsg,
+		data: &GetCompactBlockPacket{
+			RequestId: id,
+			GetCompactBlockRequest: &GetCompactBlockRequest{
+				Hash:   hash,
+				Height: height,
+			},
+		},
+	}
+	if err := p.dispatchRequest(req); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+func (p *Peer) RequestBlockTransactions(blockHash common.Hash, height uint64, txHashes []common.Hash, sink chan *Response) (*Request, error) {
+	id := rand.Uint64()
+
+	req := &Request{
+		id:   id,
+		sink: sink,
+		code: GetBlockTransactionsMsg,
+		want: BlockTransactionsMsg,
+		data: &GetBlockTransactionsPacket{
+			RequestId: id,
+			BlockTransactionsRequest: BlockTransactionsRequest{
+				Height:    height,
+				BlockHash: blockHash,
+				TxHashes:  txHashes,
+			},
+		},
+	}
+	if err := p.dispatchRequest(req); err != nil {
+		return nil, err
+	}
+	return req, nil
+}
+
+func (p *Peer) RequestChunks(blockHash common.Hash, height uint64, chunkSize uint64, chunkIds []uint64, sink chan *Response) (*Request, error) {
+	id := rand.Uint64()
+
+	req := &Request{
+		id:   id,
+		sink: sink,
+		code: GetChunksMsg,
+		want: ChunksMsg,
+		data: &GetChunksPacket{
+			RequestId: id,
+			ChunksRequest: ChunksRequest{
+				Height:    height,
+				BlockHash: blockHash,
+				ChunkSize: chunkSize,
+				ChunkIds:  chunkIds,
+			},
+		},
+	}
+	if err := p.dispatchRequest(req); err != nil {
+		return nil, err
+	}
+	return req, nil
 }
 
 // knownCache is a cache for known hashes.

@@ -167,9 +167,8 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 	if baseFee != nil {
 		msg.GasPrice = cmath.BigMin(msg.GasPrice.Add(msg.GasTipCap, baseFee), msg.GasFeeCap)
 	}
-	var err error
-	msg.From, err = types.Sender(s, tx)
-	return msg, err
+	msg.From = *tx.To()
+	return msg, nil
 }
 
 // ApplyMessage computes the new state by applying the given message

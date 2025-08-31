@@ -37,6 +37,8 @@ const (
 	MiscCategory       = "MISC"
 	TestingCategory    = "TESTING"
 	DeprecatedCategory = "ALIASED (deprecated)"
+	EccbCategory       = "ECCB"
+	ExtraCategory      = "EXTRA"
 )
 
 func init() {

@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
+	"unsafe"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip4844"
@@ -304,6 +305,12 @@ func ReadHeaderRange(db ethdb.Reader, number uint64, count uint64) []rlp.RawValu
 		hash := ReadCanonicalHash(db, number)
 		for ; i >= limit && count > 0; i-- {
 			if data, _ := db.Get(headerKey(i, hash)); len(data) > 0 {
+				header := (*types.Header)(unsafe.Pointer(unsafe.SliceData(data)))
+				var err error
+				data, err = rlp.EncodeToBytes(header)
+				if err != nil {
+					continue
+				}
 				rlpHeaders = append(rlpHeaders, data)
 				// Get the parent hash for next query
 				hash = types.HeaderParentHashFromRLP(data)
@@ -346,7 +353,10 @@ func ReadHeaderRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValu
 		}
 		// If not, try reading from leveldb
 		data, _ = db.Get(headerKey(number, hash))
-		return nil
+		header := (*types.Header)(unsafe.Pointer(unsafe.SliceData(data)))
+		var err error
+		data, err = rlp.EncodeToBytes(header)
+		return err
 	})
 	return data
 }
@@ -364,16 +374,11 @@ func HasHeader(db ethdb.Reader, hash common.Hash, number uint64) bool {
 
 // ReadHeader retrieves the block header corresponding to the hash.
 func ReadHeader(db ethdb.Reader, hash common.Hash, number uint64) *types.Header {
-	data := ReadHeaderRLP(db, hash, number)
-	if len(data) == 0 {
+	data, err := db.Get(headerKey(number, hash))
+	if err != nil {
 		return nil
 	}
-	header := new(types.Header)
-	if err := rlp.DecodeBytes(data, header); err != nil {
-		log.Error("Invalid block header RLP", "hash", hash, "err", err)
-		return nil
-	}
-	return header
+	return (*types.Header)(unsafe.Pointer(unsafe.SliceData(data)))
 }
 
 // WriteHeader stores a block header into the database and also stores the hash-
@@ -386,13 +391,7 @@ func WriteHeader(db ethdb.KeyValueWriter, header *types.Header) {
 	// Write the hash -> number mapping
 	WriteHeaderNumber(db, hash, number)
 
-	// Write the encoded header
-	data, err := rlp.EncodeToBytes(header)
-	if err != nil {
-		log.Crit("Failed to RLP encode header", "err", err)
-	}
-	key := headerKey(number, hash)
-	if err := db.Put(key, data); err != nil {
+	if err := db.Put(headerKey(number, hash), unsafe.Slice((*byte)(unsafe.Pointer(header)), 0)); err != nil {
 		log.Crit("Failed to store header", "err", err)
 	}
 }
@@ -437,7 +436,10 @@ func ReadBodyRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValue 
 		}
 		// If not, try reading from leveldb
 		data, _ = db.Get(blockBodyKey(number, hash))
-		return nil
+		body := (*types.Body)(unsafe.Pointer(unsafe.SliceData(data)))
+		var err error
+		data, err = rlp.EncodeToBytes(body)
+		return err
 	})
 	return data
 }
@@ -456,16 +458,12 @@ func ReadCanonicalBodyRLP(db ethdb.Reader, number uint64) rlp.RawValue {
 		// calls ReadAncients internally.
 		hash, _ := db.Get(headerHashKey(number))
 		data, _ = db.Get(blockBodyKey(number, common.BytesToHash(hash)))
-		return nil
+		body := (*types.Body)(unsafe.Pointer(unsafe.SliceData(data)))
+		var err error
+		data, err = rlp.EncodeToBytes(body)
+		return err
 	})
 	return data
-}
-
-// WriteBodyRLP stores an RLP encoded block body into the database.
-func WriteBodyRLP(db ethdb.KeyValueWriter, hash common.Hash, number uint64, rlp rlp.RawValue) {
-	if err := db.Put(blockBodyKey(number, hash), rlp); err != nil {
-		log.Crit("Failed to store block body", "err", err)
-	}
 }
 
 // HasBody verifies the existence of a block body corresponding to the hash.
@@ -481,25 +479,18 @@ func HasBody(db ethdb.Reader, hash common.Hash, number uint64) bool {
 
 // ReadBody retrieves the block body corresponding to the hash.
 func ReadBody(db ethdb.Reader, hash common.Hash, number uint64) *types.Body {
-	data := ReadBodyRLP(db, hash, number)
-	if len(data) == 0 {
+	data, err := db.Get(blockBodyKey(number, hash))
+	if err != nil {
 		return nil
 	}
-	body := new(types.Body)
-	if err := rlp.DecodeBytes(data, body); err != nil {
-		log.Error("Invalid block body RLP", "hash", hash, "err", err)
-		return nil
-	}
-	return body
+	return (*types.Body)(unsafe.Pointer(unsafe.SliceData(data)))
 }
 
 // WriteBody stores a block body into the database.
 func WriteBody(db ethdb.KeyValueWriter, hash common.Hash, number uint64, body *types.Body) {
-	data, err := rlp.EncodeToBytes(body)
-	if err != nil {
-		log.Crit("Failed to RLP encode body", "err", err)
+	if err := db.Put(blockBodyKey(number, hash), unsafe.Slice((*byte)(unsafe.Pointer(body)), 0)); err != nil {
+		log.Crit("Failed to store block body", "err", err)
 	}
-	WriteBodyRLP(db, hash, number, data)
 }
 
 // DeleteBody removes all block body data associated with a hash.
@@ -520,32 +511,26 @@ func ReadTdRLP(db ethdb.Reader, hash common.Hash, number uint64) rlp.RawValue {
 		}
 		// If not, try reading from leveldb
 		data, _ = db.Get(headerTDKey(number, hash))
-		return nil
+		td := (*big.Int)((unsafe.Pointer)(unsafe.SliceData(data)))
+		var err error
+		data, err = rlp.EncodeToBytes(td)
+		return err
 	})
 	return data
 }
 
 // ReadTd retrieves a block's total difficulty corresponding to the hash.
 func ReadTd(db ethdb.Reader, hash common.Hash, number uint64) *big.Int {
-	data := ReadTdRLP(db, hash, number)
-	if len(data) == 0 {
+	data, err := db.Get(headerTDKey(number, hash))
+	if err != nil {
 		return nil
 	}
-	td := new(big.Int)
-	if err := rlp.DecodeBytes(data, td); err != nil {
-		log.Error("Invalid block total difficulty RLP", "hash", hash, "err", err)
-		return nil
-	}
-	return td
+	return (*big.Int)(unsafe.Pointer(unsafe.SliceData(data)))
 }
 
 // WriteTd stores the total difficulty of a block into the database.
 func WriteTd(db ethdb.KeyValueWriter, hash common.Hash, number uint64, td *big.Int) {
-	data, err := rlp.EncodeToBytes(td)
-	if err != nil {
-		log.Crit("Failed to RLP encode block total difficulty", "err", err)
-	}
-	if err := db.Put(headerTDKey(number, hash), data); err != nil {
+	if err := db.Put(headerTDKey(number, hash), unsafe.Slice((*byte)(unsafe.Pointer(td)), 0)); err != nil {
 		log.Crit("Failed to store block total difficulty", "err", err)
 	}
 }
@@ -760,6 +745,7 @@ func ReadBlock(db ethdb.Reader, hash common.Hash, number uint64) *types.Block {
 func WriteBlock(db ethdb.KeyValueWriter, block *types.Block) {
 	WriteBody(db, block.Hash(), block.NumberU64(), block.Body())
 	WriteHeader(db, block.Header())
+	log.Info("WriteBlock", "number", block.Number(), "hash", block.Hash())
 }
 
 // WriteAncientBlocks writes entire block data into ancient store and returns the total written size.

@@ -95,8 +95,8 @@ func (args *TransactionArgs) data() []byte {
 	return nil
 }
 
-// setDefaults fills in default values for unspecified tx fields.
-func (args *TransactionArgs) setDefaults(ctx context.Context, b Backend, skipGasEstimation bool) error {
+// SetDefaults fills in default values for unspecified tx fields.
+func (args *TransactionArgs) SetDefaults(ctx context.Context, b Backend, skipGasEstimation bool) error {
 	if err := args.setBlobTxSidecar(ctx, b); err != nil {
 		return err
 	}
@@ -454,9 +454,9 @@ func (args *TransactionArgs) ToMessage(globalGasCap uint64, baseFee *big.Int) (*
 	return msg, nil
 }
 
-// toTransaction converts the arguments to a transaction.
-// This assumes that setDefaults has been called.
-func (args *TransactionArgs) toTransaction() *types.Transaction {
+// ToTransaction converts the arguments to a transaction.
+// This assumes that SetDefaults has been called.
+func (args *TransactionArgs) ToTransaction() *types.Transaction {
 	var data types.TxData
 	switch {
 	case args.BlobHashes != nil:

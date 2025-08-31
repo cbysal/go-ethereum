@@ -294,7 +294,12 @@ func accountCreate(ctx *cli.Context) error {
 
 	password := utils.GetPassPhraseWithList("Your new account is locked with a password. Please give a password. Do not forget this password.", true, 0, utils.MakePasswordList(ctx))
 
-	account, err := keystore.StoreKey(keydir, password, scryptN, scryptP)
+	var account accounts.Account
+	if ctx.IsSet(utils.UsePlainKeyFlag.Name) && ctx.Bool(utils.UsePlainKeyFlag.Name) {
+		account, err = keystore.StorePlainKey(keydir, password)
+	} else {
+		account, err = keystore.StoreKey(keydir, password, scryptN, scryptP)
+	}
 
 	if err != nil {
 		utils.Fatalf("Failed to create account: %v", err)

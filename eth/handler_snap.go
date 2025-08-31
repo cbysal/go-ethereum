@@ -48,3 +48,7 @@ func (h *snapHandler) PeerInfo(id enode.ID) interface{} {
 func (h *snapHandler) Handle(peer *snap.Peer, packet snap.Packet) error {
 	return h.downloader.DeliverSnapPacket(peer, packet)
 }
+
+func (h *snapHandler) Protocol() uint {
+	return h.protocol
+}

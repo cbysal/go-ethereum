@@ -1,3 +1,30 @@
+## ECCB
+This is an ECCB prototyping implementation.
+
+### Build
+See [Building the source](#building-the-source).
+
+### Run
+A newly added subcommand **gentxs** is used to generate blocks from transactions extracted with [ethex](https://github.com/cbysal/ethex). You can run this subcommand as follows:
+```bash
+./geth --datadir [datadir] --plainkey --unlockall --password [password] gentxs [txs] [native_blocks] [alias_blocks]
+```
+
+The meanings of **datadir** and **password** are the same as in Geth. **txs** is the path to the database containing transactions extracted with [ethex](https://github.com/cbysal/ethex). **native_blocks** is the path to the database containing generated native blocks. **alias_blocks** is the path to the database containing generated alias blocks.
+
+There are several newly added options, as follows:
+| Option | Description |
+| :-: | - |
+| --protocol | specify the propagation protocol: 68 stands for Native, 69 stands for BCB, 70 stands for ECCB |
+| --matchblock | block matching ratio, which is the complement of the recommunication ratio |
+| --matchtx | hitting transaction ratio |
+| --plainkey | use plain keys for accounts to reduce CPU and RAM usage |
+| --unlockall | unlock all accounts in the keystore |
+| --conn | specify the file containing connection information |
+| --txs | specify the database containing transactions to be sealed |
+
+The following is the original Go Ethereum README.
+
 ## Go Ethereum
 
 Golang execution layer implementation of the Ethereum protocol.

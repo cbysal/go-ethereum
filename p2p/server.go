@@ -33,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/netlimit"
 	"github.com/ethereum/go-ethereum/p2p/discover"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
@@ -69,6 +70,15 @@ var (
 	errEncHandshakeError   = errors.New("rlpx enc error")
 	errProtoHandshakeError = errors.New("rlpx proto error")
 )
+
+type ConnInfo struct {
+	Address   string `json:"address"`
+	Bandwidth int64  `json:"bandwidth"`
+	Peers     map[string]struct {
+		Enode   string `json:"enode"`
+		Latency int64  `json:"latency"`
+	} `json:"peers"`
+}
 
 // Config holds Server options.
 type Config struct {
@@ -165,6 +175,8 @@ type Config struct {
 	// Logger is a custom logger to use with the p2p.Server.
 	Logger log.Logger `toml:",omitempty"`
 
+	ConnInfo *ConnInfo `toml:",omitempty"`
+
 	clock mclock.Clock
 }
 
@@ -210,6 +222,8 @@ type Server struct {
 
 	// State of run loop and listenLoop.
 	inboundHistory expHeap
+
+	netLimiter *netlimit.Limiter
 }
 
 type peerOpFunc func(map[enode.ID]*Peer)
@@ -471,8 +485,37 @@ func (srv *Server) Start() (err error) {
 	if srv.newTransport == nil {
 		srv.newTransport = newRLPX
 	}
+	if srv.ConnInfo != nil {
+		localAddr, err := net.ResolveTCPAddr("tcp", srv.ConnInfo.Address)
+		if err != nil {
+			return err
+		}
+		bandwidth := srv.ConnInfo.Bandwidth
+		latencies := make(map[string]time.Duration)
+		for addr, peer := range srv.ConnInfo.Peers {
+			remoteAddr, err := net.ResolveTCPAddr("tcp", addr)
+			if err != nil {
+				return err
+			}
+			latency := time.Duration(peer.Latency) * time.Millisecond
+			latencies[remoteAddr.String()] = latency
+		}
+		srv.netLimiter = netlimit.NewLimiter(localAddr, bandwidth, latencies)
+
+		for _, peer := range srv.ConnInfo.Peers {
+			node, err := enode.Parse(enode.ValidSchemes, peer.Enode)
+			if err != nil {
+				return err
+			}
+			srv.StaticNodes = append(srv.StaticNodes, node)
+		}
+	}
 	if srv.listenFunc == nil {
-		srv.listenFunc = net.Listen
+		if srv.netLimiter != nil {
+			srv.listenFunc = srv.netLimiter.Listen
+		} else {
+			srv.listenFunc = net.Listen
+		}
 	}
 	srv.quit = make(chan struct{})
 	srv.delpeer = make(chan peerDrop)
@@ -606,7 +649,13 @@ func (srv *Server) setupDialScheduler() {
 		config.resolver = srv.ntab
 	}
 	if config.dialer == nil {
-		config.dialer = tcpDialer{&net.Dialer{Timeout: defaultDialTimeout}}
+		var dialer Dialer
+		if srv.netLimiter != nil {
+			dialer = srv.netLimiter.NewDialer(defaultDialTimeout)
+		} else {
+			dialer = &net.Dialer{Timeout: defaultDialTimeout}
+		}
+		config.dialer = tcpDialer{dialer}
 	}
 	srv.dialsched = newDialScheduler(config, srv.discmix, srv.SetupConn)
 	for _, n := range srv.StaticNodes {

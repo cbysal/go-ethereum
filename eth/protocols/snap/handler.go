@@ -79,6 +79,8 @@ type Backend interface {
 	// the remote peer. Only packets not consumed by the protocol handler will
 	// be forwarded to the backend.
 	Handle(peer *Peer, packet Packet) error
+
+	Protocol() uint
 }
 
 // MakeProtocols constructs the P2P protocol definitions for `snap`.
@@ -91,6 +93,9 @@ func MakeProtocols(backend Backend, dnsdisc enode.Iterator) []p2p.Protocol {
 
 	protocols := make([]p2p.Protocol, len(ProtocolVersions))
 	for i, version := range ProtocolVersions {
+		if version > backend.Protocol() {
+			continue
+		}
 		version := version // Closure
 
 		protocols[i] = p2p.Protocol{

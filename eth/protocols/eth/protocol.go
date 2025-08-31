@@ -25,12 +25,15 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core/forkid"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/rlp"
 )
 
 // Constants to match up protocol versions and messages
 const (
 	ETH68 = 68
+	ETH69 = 69
+	ETH70 = 70
 )
 
 // ProtocolName is the official short name of the `eth` protocol used during
@@ -39,11 +42,11 @@ const ProtocolName = "eth"
 
 // ProtocolVersions are the supported versions of the `eth` protocol (first
 // is primary).
-var ProtocolVersions = []uint{ETH68}
+var ProtocolVersions = []uint{ETH68, ETH69, ETH70}
 
 // protocolLengths are the number of implemented message corresponding to
 // different protocol versions.
-var protocolLengths = map[uint]uint64{ETH68: 17}
+var protocolLengths = map[uint]uint64{ETH68: 17, ETH69: 22, ETH70: 24}
 
 // maxMessageSize is the maximum cap on the size of a protocol message.
 const maxMessageSize = 10 * 1024 * 1024
@@ -62,6 +65,13 @@ const (
 	PooledTransactionsMsg         = 0x0a
 	GetReceiptsMsg                = 0x0f
 	ReceiptsMsg                   = 0x10
+	GetCompactBlockMsg            = 0x11
+	CompactBlockMsg               = 0x12
+	NewCompactBlockMsg            = 0x13
+	GetBlockTransactionsMsg       = 0x14
+	BlockTransactionsMsg          = 0x15
+	GetChunksMsg                  = 0x16
+	ChunksMsg                     = 0x17
 )
 
 var (
@@ -318,6 +328,77 @@ type PooledTransactionsRLPPacket struct {
 	PooledTransactionsRLPResponse
 }
 
+type GetCompactBlockRequest struct {
+	Hash   common.Hash
+	Height uint64
+}
+
+type GetCompactBlockPacket struct {
+	RequestId uint64
+	*GetCompactBlockRequest
+}
+
+type CompactBlockResponse struct {
+	CompactBlock *eccb.CompactBlock `rlp:"optional"`
+}
+
+type CompactBlockPacket struct {
+	RequestId uint64
+	CompactBlockResponse
+}
+
+type NewCompactBlockPacket struct {
+	CompactBlock *eccb.CompactBlock
+	TD           *big.Int
+}
+
+func (request *NewCompactBlockPacket) sanityCheck() error {
+	if err := request.CompactBlock.SanityCheck(); err != nil {
+		return err
+	}
+	if tdlen := request.TD.BitLen(); tdlen > 100 {
+		return fmt.Errorf("too large block TD: bitlen %d", tdlen)
+	}
+	return nil
+}
+
+type BlockTransactionsRequest struct {
+	Height    uint64
+	BlockHash common.Hash
+	TxHashes  []common.Hash
+}
+
+type GetBlockTransactionsPacket struct {
+	RequestId uint64
+	BlockTransactionsRequest
+}
+
+type BlockTransactionsResponse types.Transactions
+
+type BlockTransactionsPacket struct {
+	RequestId uint64
+	BlockTransactionsResponse
+}
+
+type ChunksRequest struct {
+	Height    uint64
+	BlockHash common.Hash
+	ChunkSize uint64
+	ChunkIds  []uint64
+}
+
+type GetChunksPacket struct {
+	RequestId uint64
+	ChunksRequest
+}
+
+type ChunksResponse [][]byte
+
+type ChunksPacket struct {
+	RequestId uint64
+	ChunksResponse
+}
+
 func (*StatusPacket) Name() string { return "Status" }
 func (*StatusPacket) Kind() byte   { return StatusMsg }
 
@@ -356,3 +437,24 @@ func (*GetReceiptsRequest) Kind() byte   { return GetReceiptsMsg }
 
 func (*ReceiptsResponse) Name() string { return "Receipts" }
 func (*ReceiptsResponse) Kind() byte   { return ReceiptsMsg }
+
+func (*GetCompactBlockRequest) Name() string { return "GetCompactBlock" }
+func (*GetCompactBlockRequest) Kind() byte   { return GetCompactBlockMsg }
+
+func (*CompactBlockResponse) Name() string { return "CompactBlock" }
+func (*CompactBlockResponse) Kind() byte   { return CompactBlockMsg }
+
+func (*NewCompactBlockPacket) Name() string { return "NewCompactBlock" }
+func (*NewCompactBlockPacket) Kind() byte   { return NewCompactBlockMsg }
+
+func (*GetBlockTransactionsPacket) Name() string { return "GetBlockTransactions" }
+func (*GetBlockTransactionsPacket) Kind() byte   { return GetBlockTransactionsMsg }
+
+func (*BlockTransactionsResponse) Name() string { return "BlockTransactions" }
+func (*BlockTransactionsResponse) Kind() byte   { return BlockTransactionsMsg }
+
+func (*GetChunksPacket) Name() string { return "GetChunks" }
+func (*GetChunksPacket) Kind() byte   { return GetChunksMsg }
+
+func (*ChunksResponse) Name() string { return "Chunks" }
+func (*ChunksResponse) Kind() byte   { return ChunksMsg }

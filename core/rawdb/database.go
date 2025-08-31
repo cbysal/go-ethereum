@@ -28,6 +28,7 @@ import (
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethdb"
+	"github.com/ethereum/go-ethereum/ethdb/badger"
 	"github.com/ethereum/go-ethereum/ethdb/leveldb"
 	"github.com/ethereum/go-ethereum/ethdb/memorydb"
 	"github.com/ethereum/go-ethereum/ethdb/pebble"
@@ -332,7 +333,16 @@ func NewPebbleDBDatabase(file string, cache int, handles int, namespace string, 
 	return NewDatabase(db), nil
 }
 
+func NewBadgerDBDatabase(file string) (ethdb.Database, error) {
+	db, err := badger.New(file)
+	if err != nil {
+		return nil, err
+	}
+	return NewDatabase(db), nil
+}
+
 const (
+	dbBadger  = "badger"
 	dbPebble  = "pebble"
 	dbLeveldb = "leveldb"
 )
@@ -376,7 +386,7 @@ type OpenOptions struct {
 //	db is existent     |  from db         |  specified type (if compatible)
 func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	// Reject any unsupported database type
-	if len(o.Type) != 0 && o.Type != dbLeveldb && o.Type != dbPebble {
+	if len(o.Type) != 0 && o.Type != dbLeveldb && o.Type != dbPebble && o.Type != dbBadger {
 		return nil, fmt.Errorf("unknown db.engine %v", o.Type)
 	}
 	// Retrieve any pre-existing database's type and use that or the requested one
@@ -384,6 +394,10 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 	existingDb := PreexistingDatabase(o.Directory)
 	if len(existingDb) != 0 && len(o.Type) != 0 && o.Type != existingDb {
 		return nil, fmt.Errorf("db.engine choice was %v but found pre-existing %v database in specified data directory", o.Type, existingDb)
+	}
+	if o.Type == dbBadger || existingDb == dbBadger {
+		log.Info("Using badger as the backing database")
+		return NewBadgerDBDatabase(o.Directory)
 	}
 	if o.Type == dbPebble || existingDb == dbPebble {
 		log.Info("Using pebble as the backing database")
@@ -394,8 +408,8 @@ func openKeyValueDatabase(o OpenOptions) (ethdb.Database, error) {
 		return NewLevelDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly)
 	}
 	// No pre-existing database, no user-requested one either. Default to Pebble.
-	log.Info("Defaulting to pebble as the backing database")
-	return NewPebbleDBDatabase(o.Directory, o.Cache, o.Handles, o.Namespace, o.ReadOnly, o.Ephemeral)
+	log.Info("Defaulting to badger as the backing database")
+	return NewBadgerDBDatabase(o.Directory)
 }
 
 // Open opens both a disk-based key-value database such as leveldb or pebble, but also

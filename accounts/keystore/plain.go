@@ -17,11 +17,13 @@
 package keystore
 
 import (
+	"crypto/rand"
 	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
 
+	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 )
 
@@ -43,6 +45,11 @@ func (ks keyStorePlain) GetKey(addr common.Address, filename, auth string) (*Key
 		return nil, fmt.Errorf("key content mismatch: have address %x, want %x", key.Address, addr)
 	}
 	return key, nil
+}
+
+func StorePlainKey(dir, auth string) (accounts.Account, error) {
+	_, a, err := storeNewKey(&keyStorePlain{dir}, rand.Reader, auth)
+	return a, err
 }
 
 func (ks keyStorePlain) StoreKey(filename string, key *Key, auth string) error {

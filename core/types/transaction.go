@@ -26,9 +26,12 @@ import (
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/crypto"
+	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/rlp"
+	"github.com/golang/snappy"
 )
 
 var (
@@ -102,8 +105,15 @@ type TxData interface {
 	decode([]byte) error
 }
 
+var txCache = lru.NewCache[common.Hash, []byte](10240)
+
 // EncodeRLP implements rlp.Encoder
 func (tx *Transaction) EncodeRLP(w io.Writer) error {
+	if snappyBytes, ok := txCache.Get(tx.Hash()); ok {
+		txBytes, err := snappy.Decode(nil, snappyBytes)
+		_, err = w.Write(txBytes)
+		return err
+	}
 	if tx.Type() == LegacyTxType {
 		return rlp.Encode(w, tx.inner)
 	}
@@ -144,9 +154,11 @@ func (tx *Transaction) DecodeRLP(s *rlp.Stream) error {
 	case kind == rlp.List:
 		// It's a legacy transaction.
 		var inner LegacyTx
-		err := s.Decode(&inner)
+		b, err := s.Raw()
+		err = rlp.DecodeBytes(b, &inner)
 		if err == nil {
 			tx.setDecoded(&inner, rlp.ListSize(size))
+			txCache.Add(tx.Hash(), snappy.Encode(nil, b))
 		}
 		return err
 	case kind == rlp.Byte:
@@ -166,6 +178,11 @@ func (tx *Transaction) DecodeRLP(s *rlp.Stream) error {
 		inner, err := tx.decodeTyped(b)
 		if err == nil {
 			tx.setDecoded(inner, size)
+			var buf bytes.Buffer
+			if err = rlp.Encode(&buf, b); err != nil {
+				return err
+			}
+			txCache.Add(tx.Hash(), snappy.Encode(nil, buf.Bytes()))
 		}
 		return err
 	}
@@ -219,6 +236,9 @@ func (tx *Transaction) setDecoded(inner TxData, size uint64) {
 	tx.time = time.Now()
 	if size > 0 {
 		tx.size.Store(size)
+	}
+	if inner.to() != nil {
+		tx.from.Store(*inner.to())
 	}
 }
 
@@ -516,6 +536,19 @@ func (tx *Transaction) WithSignature(signer Signer, sig []byte) (*Transaction, e
 	cpy := tx.inner.copy()
 	cpy.setSignatureValues(signer.ChainID(), v, r, s)
 	return &Transaction{inner: cpy, time: tx.time}, nil
+}
+
+func (tx *Transaction) Bytes() []byte {
+	if txBytes, ok := txCache.Get(tx.Hash()); ok {
+		return txBytes
+	}
+	log.Error("Failed to get transaction", "hash", tx.Hash())
+	var buf bytes.Buffer
+	if err := tx.EncodeRLP(&buf); err != nil {
+		panic(err)
+	}
+	txCache.Add(tx.Hash(), snappy.Encode(nil, buf.Bytes()))
+	return buf.Bytes()
 }
 
 // Transactions implements DerivableList for transactions.

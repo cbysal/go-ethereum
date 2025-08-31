@@ -19,6 +19,7 @@ package eth
 import (
 	"fmt"
 	"math/big"
+	"sync"
 	"time"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -29,6 +30,7 @@ import (
 	"github.com/ethereum/go-ethereum/p2p/enode"
 	"github.com/ethereum/go-ethereum/p2p/enr"
 	"github.com/ethereum/go-ethereum/params"
+	"github.com/klauspost/reedsolomon"
 )
 
 const (
@@ -81,18 +83,25 @@ type Backend interface {
 	// the remote peer. Only packets not consumed by the protocol handler will
 	// be forwarded to the backend.
 	Handle(peer *Peer, packet Packet) error
+
+	Protocol() uint
 }
 
 // TxPool defines the methods needed by the protocol handler to serve transactions.
 type TxPool interface {
 	// Get retrieves the transaction from the local txpool with the given hash.
 	Get(hash common.Hash) *types.Transaction
+
+	GetKnownTxs(block *types.Block) []bool
 }
 
 // MakeProtocols constructs the P2P protocol definitions for `eth`.
 func MakeProtocols(backend Backend, network uint64, dnsdisc enode.Iterator) []p2p.Protocol {
 	protocols := make([]p2p.Protocol, 0, len(ProtocolVersions))
 	for _, version := range ProtocolVersions {
+		if version > backend.Protocol() {
+			continue
+		}
 		version := version // Closure
 
 		protocols = append(protocols, p2p.Protocol{
@@ -177,6 +186,50 @@ var eth68 = map[uint64]msgHandler{
 	PooledTransactionsMsg:         handlePooledTransactions,
 }
 
+var eth69 = map[uint64]msgHandler{
+	NewBlockHashesMsg:             handleNewBlockhashes,
+	NewBlockMsg:                   handleNewBlock,
+	TransactionsMsg:               handleTransactions,
+	NewPooledTransactionHashesMsg: handleNewPooledTransactionHashes,
+	GetBlockHeadersMsg:            handleGetBlockHeaders,
+	BlockHeadersMsg:               handleBlockHeaders,
+	GetBlockBodiesMsg:             handleGetBlockBodies,
+	BlockBodiesMsg:                handleBlockBodies,
+	GetReceiptsMsg:                handleGetReceipts,
+	ReceiptsMsg:                   handleReceipts,
+	GetPooledTransactionsMsg:      handleGetPooledTransactions,
+	PooledTransactionsMsg:         handlePooledTransactions,
+	GetCompactBlockMsg:            handleGetCompactBlock69,
+	CompactBlockMsg:               handleCompactBlock,
+	NewCompactBlockMsg:            handleNewCompactBlock,
+	GetBlockTransactionsMsg:       handleGetBlockTransactions,
+	BlockTransactionsMsg:          handleBlockTransactions,
+}
+
+var eth70 = map[uint64]msgHandler{
+	NewBlockHashesMsg:             handleNewBlockhashes,
+	NewBlockMsg:                   handleNewBlock,
+	TransactionsMsg:               handleTransactions,
+	NewPooledTransactionHashesMsg: handleNewPooledTransactionHashes,
+	GetBlockHeadersMsg:            handleGetBlockHeaders,
+	BlockHeadersMsg:               handleBlockHeaders,
+	GetBlockBodiesMsg:             handleGetBlockBodies,
+	BlockBodiesMsg:                handleBlockBodies,
+	GetReceiptsMsg:                handleGetReceipts,
+	ReceiptsMsg:                   handleReceipts,
+	GetPooledTransactionsMsg:      handleGetPooledTransactions,
+	PooledTransactionsMsg:         handlePooledTransactions,
+	GetCompactBlockMsg:            handleGetCompactBlock70,
+	CompactBlockMsg:               handleCompactBlock,
+	NewCompactBlockMsg:            handleNewCompactBlock,
+	GetBlockTransactionsMsg:       handleGetBlockTransactions,
+	BlockTransactionsMsg:          handleBlockTransactions,
+	GetChunksMsg:                  handleGetChunks,
+	ChunksMsg:                     handleChunks,
+}
+
+var once sync.Once
+
 // handleMessage is invoked whenever an inbound message is received from a remote
 // peer. The remote connection is torn down upon returning any error.
 func handleMessage(backend Backend, peer *Peer) error {
@@ -191,6 +244,15 @@ func handleMessage(backend Backend, peer *Peer) error {
 	defer msg.Discard()
 
 	var handlers = eth68
+	if peer.Version() >= ETH69 {
+		handlers = eth69
+	}
+	if peer.Version() >= ETH70 {
+		handlers = eth70
+		once.Do(func() {
+			reedsolomon.New(1024, 1024)
+		})
+	}
 
 	// Track the amount of time it takes to serve the request and run the handler
 	if metrics.Enabled {

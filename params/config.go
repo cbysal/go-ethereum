@@ -365,6 +365,7 @@ type ChainConfig struct {
 	// Various consensus engines
 	Ethash *EthashConfig `json:"ethash,omitempty"`
 	Clique *CliqueConfig `json:"clique,omitempty"`
+	Solo   *SoloConfig   `json:"solo,omitempty"`
 }
 
 // EthashConfig is the consensus engine configs for proof-of-work based sealing.
@@ -385,6 +386,12 @@ type CliqueConfig struct {
 func (c *CliqueConfig) String() string {
 	return "clique"
 }
+
+type SoloConfig struct {
+	Period uint64 `json:"period"`
+}
+
+func (c *SoloConfig) String() string { return "solo" }
 
 // Description returns a human-readable description of ChainConfig.
 func (c *ChainConfig) Description() string {
@@ -412,6 +419,14 @@ func (c *ChainConfig) Description() string {
 			banner += "Consensus: Beacon (proof-of-stake), merging from Clique (proof-of-authority)\n"
 		} else {
 			banner += "Consensus: Beacon (proof-of-stake), merged from Clique (proof-of-authority)\n"
+		}
+	case c.Solo != nil:
+		if c.TerminalTotalDifficulty == nil {
+			banner += "Consensus: Solo (proof-of-period)\n"
+		} else if !c.TerminalTotalDifficultyPassed {
+			banner += "Consensus: Beacon (proof-of-stake), merging from Solo (proof-of-period)\n"
+		} else {
+			banner += "Consensus: Beacon (proof-of-stake), merged from Solo (proof-of-period)\n"
 		}
 	default:
 		banner += "Consensus: unknown\n"

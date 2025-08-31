@@ -19,13 +19,19 @@ package eth
 import (
 	"encoding/json"
 	"fmt"
+	"slices"
+	"time"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/conf"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/log"
+	"github.com/ethereum/go-ethereum/p2p"
 	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/ethereum/go-ethereum/trie"
+	"github.com/golang/snappy"
 )
 
 func handleGetBlockHeaders(backend Backend, msg Decoder, peer *Peer) error {
@@ -481,4 +487,177 @@ func handlePooledTransactions(backend Backend, msg Decoder, peer *Peer) error {
 	requestTracker.Fulfil(peer.id, peer.version, PooledTransactionsMsg, txs.RequestId)
 
 	return backend.Handle(peer, &txs.PooledTransactionsResponse)
+}
+
+func handleGetCompactBlock69(backend Backend, msg Decoder, peer *Peer) error {
+	var query GetCompactBlockPacket
+	if err := msg.Decode(&query); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	block := backend.Chain().GetBlock(query.Hash, query.Height)
+	if block == nil {
+		return p2p.Send(peer.rw, CompactBlockMsg, &CompactBlockPacket{
+			RequestId:            query.RequestId,
+			CompactBlockResponse: CompactBlockResponse{},
+		})
+	}
+	compactBlock, err := eccb.NewCompactBlock(block, nil)
+	if err != nil {
+		return err
+	}
+	return p2p.Send(peer.rw, CompactBlockMsg, &CompactBlockPacket{
+		RequestId: query.RequestId,
+		CompactBlockResponse: CompactBlockResponse{
+			CompactBlock: compactBlock,
+		},
+	})
+}
+
+func handleGetCompactBlock70(backend Backend, msg Decoder, peer *Peer) error {
+	var query GetCompactBlockPacket
+	if err := msg.Decode(&query); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	block := backend.Chain().GetBlock(query.Hash, query.Height)
+	if block == nil {
+		return p2p.Send(peer.rw, CompactBlockMsg, &CompactBlockPacket{
+			RequestId:            query.RequestId,
+			CompactBlockResponse: CompactBlockResponse{},
+		})
+	}
+	knownTxs := peer.txpool.GetKnownTxs(block)
+	compactBlock, err := eccb.NewCompactBlock(block, knownTxs)
+	if err != nil {
+		return err
+	}
+	for conf.SendBlockCount.Load() != 0 {
+		time.Sleep(time.Millisecond)
+	}
+	return p2p.Send(peer.rw, CompactBlockMsg, &CompactBlockPacket{
+		RequestId: query.RequestId,
+		CompactBlockResponse: CompactBlockResponse{
+			CompactBlock: compactBlock,
+		},
+	})
+}
+
+func handleCompactBlock(backend Backend, msg Decoder, peer *Peer) error {
+	res := new(CompactBlockPacket)
+	if err := msg.Decode(res); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	return peer.dispatchResponse(&Response{
+		id:   res.RequestId,
+		code: CompactBlockMsg,
+		Res:  &res.CompactBlockResponse,
+	}, nil)
+}
+
+func handleNewCompactBlock(backend Backend, msg Decoder, peer *Peer) error {
+	ann := new(NewCompactBlockPacket)
+	if err := msg.Decode(ann); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	if err := ann.sanityCheck(); err != nil {
+		return err
+	}
+	if hash := types.CalcUncleHash(ann.CompactBlock.Uncles()); hash != ann.CompactBlock.UncleHash() {
+		log.Warn("Propagated compact block has invalid uncles", "have", hash, "exp", ann.CompactBlock.UncleHash())
+		return nil
+	}
+	ann.CompactBlock.ReceivedAt = msg.Time()
+	ann.CompactBlock.ReceivedFrom = peer
+
+	peer.markBlock(ann.CompactBlock.Hash())
+
+	return backend.Handle(peer, ann)
+}
+
+func handleGetBlockTransactions(backend Backend, msg Decoder, peer *Peer) error {
+	var query GetBlockTransactionsPacket
+	if err := msg.Decode(&query); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+
+	response := make(BlockTransactionsResponse, 0, len(query.TxHashes))
+	block := backend.Chain().GetBlock(query.BlockHash, query.Height)
+	if block != nil {
+		for _, txHash := range query.TxHashes {
+			tx := block.Transaction(txHash)
+			if tx == nil {
+				continue
+			}
+			peer.knownTxs.Add(txHash)
+			response = append(response, tx)
+		}
+	}
+
+	return p2p.Send(peer.rw, BlockTransactionsMsg, &BlockTransactionsPacket{
+		RequestId:                 query.RequestId,
+		BlockTransactionsResponse: response,
+	})
+}
+
+func handleBlockTransactions(backend Backend, msg Decoder, peer *Peer) error {
+	res := new(BlockTransactionsPacket)
+	if err := msg.Decode(res); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	metadata := func() interface{} {
+		return slices.Clone(res.BlockTransactionsResponse)
+	}
+	return peer.dispatchResponse(&Response{
+		id:   res.RequestId,
+		code: BlockTransactionsMsg,
+		Res:  &res.BlockTransactionsResponse,
+	}, metadata)
+}
+
+func handleGetChunks(backend Backend, msg Decoder, peer *Peer) error {
+	var query GetChunksPacket
+	if err := msg.Decode(&query); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+
+	block := backend.Chain().GetBlock(query.BlockHash, query.Height)
+	if block == nil {
+		return p2p.Send(peer.rw, ChunksMsg, &ChunksPacket{
+			RequestId:      query.RequestId,
+			ChunksResponse: ChunksResponse{},
+		})
+	}
+	txsBytes := make([]byte, 0, block.Size())
+	for _, tx := range block.Transactions() {
+		txBytes, err := rlp.EncodeToBytes(tx)
+		if err != nil {
+			return p2p.Send(peer.rw, ChunksMsg, &ChunksPacket{
+				RequestId:      query.RequestId,
+				ChunksResponse: ChunksResponse{},
+			})
+		}
+		encodedBytes := snappy.Encode(nil, txBytes)
+		txsBytes = append(txsBytes, encodedBytes...)
+	}
+	response := make(ChunksResponse, len(query.ChunkIds))
+	for i, id := range query.ChunkIds {
+		response[i] = make([]byte, query.ChunkSize)
+		copy(response[i], txsBytes[id*query.ChunkSize:min((id+1)*query.ChunkSize, uint64(len(txsBytes)))])
+	}
+
+	return p2p.Send(peer.rw, ChunksMsg, &ChunksPacket{
+		RequestId:      query.RequestId,
+		ChunksResponse: response,
+	})
+}
+
+func handleChunks(backend Backend, msg Decoder, peer *Peer) error {
+	res := new(ChunksPacket)
+	if err := msg.Decode(res); err != nil {
+		return fmt.Errorf("%w: message %v: %v", errDecode, msg, err)
+	}
+	return peer.dispatchResponse(&Response{
+		id:   res.RequestId,
+		code: ChunksMsg,
+		Res:  &res.ChunksResponse,
+	}, nil)
 }

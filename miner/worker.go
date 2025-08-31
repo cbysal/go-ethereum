@@ -24,6 +24,7 @@ import (
 	"sync/atomic"
 	"time"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/misc/eip1559"
@@ -33,6 +34,7 @@ import (
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/event"
 	"github.com/ethereum/go-ethereum/log"
 	"github.com/ethereum/go-ethereum/params"
@@ -240,9 +242,11 @@ type worker struct {
 	skipSealHook func(*task) bool                   // Method to decide whether skipping the sealing.
 	fullTaskHook func()                             // Method to call before pushing the full sealing task.
 	resubmitHook func(time.Duration, time.Duration) // Method to call upon updating resubmitting interval.
+
+	txsDb *badger.DB
 }
 
-func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
+func newWorker(config *Config, chainConfig *params.ChainConfig, txsDb *badger.DB, engine consensus.Engine, eth Backend, mux *event.TypeMux, isLocalBlock func(header *types.Header) bool, init bool) *worker {
 	worker := &worker{
 		config:             config,
 		chainConfig:        chainConfig,
@@ -265,6 +269,7 @@ func newWorker(config *Config, chainConfig *params.ChainConfig, engine consensus
 		exitCh:             make(chan struct{}),
 		resubmitIntervalCh: make(chan time.Duration),
 		resubmitAdjustCh:   make(chan *intervalAdjust, resubmitAdjustChanSize),
+		txsDb:              txsDb,
 	}
 	// Subscribe for transaction insertion events (whether from network or resurrects)
 	worker.txsSub = eth.TxPool().SubscribeTransactions(worker.txsCh, true)
@@ -471,7 +476,9 @@ func (w *worker) newWorkLoop(recommit time.Duration) {
 		case <-timer.C:
 			// If sealing is running resubmit a new work cycle periodically to pull in
 			// higher priced transactions. Disable this overhead for pending blocks.
-			if w.isRunning() && (w.chainConfig.Clique == nil || w.chainConfig.Clique.Period > 0) {
+			if w.isRunning() && (w.chainConfig.Clique == nil && w.chainConfig.Solo == nil ||
+				(w.chainConfig.Clique != nil && w.chainConfig.Clique.Period > 0) ||
+				(w.chainConfig.Solo != nil && w.chainConfig.Solo.Period > 0)) {
 				// Short circuit if no new transaction arrives.
 				if w.newTxs.Load() == 0 {
 					timer.Reset(recommit)
@@ -811,98 +818,137 @@ func (w *worker) commitTransactions(env *environment, plainTxs, blobTxs *transac
 	}
 	var coalescedLogs []*types.Log
 
-	for {
-		// Check interruption signal and abort building if it's fired.
-		if interrupt != nil {
-			if signal := interrupt.Load(); signal != commitInterruptNone {
-				return signalToErr(signal)
+	if w.txsDb != nil {
+		txs, err := eccb.ReadTxs(w.txsDb, env.header.Number.Uint64())
+		if err != nil {
+			return err
+		}
+		for _, tx := range txs {
+			// Check interruption signal and abort building if it's fired.
+			if interrupt != nil {
+				if signal := interrupt.Load(); signal != commitInterruptNone {
+					return signalToErr(signal)
+				}
+			}
+
+			// Error may be ignored here. The error has already been checked
+			// during transaction acceptance is the transaction pool.
+			from, _ := types.Sender(env.signer, tx)
+
+			// Start executing the transaction
+			env.state.SetTxContext(tx.Hash(), env.tcount)
+
+			logs, err := w.commitTransaction(env, tx)
+			switch {
+			case errors.Is(err, core.ErrNonceTooLow):
+				// New head notification data race between the transaction pool and miner, shift
+				log.Trace("Skipping transaction with low nonce", "hash", tx.Hash(), "sender", from, "nonce", tx.Nonce())
+
+			case errors.Is(err, nil):
+				// Everything ok, collect the logs and shift in the next transaction from the same account
+				coalescedLogs = append(coalescedLogs, logs...)
+				env.tcount++
+
+			default:
+				// Transaction is regarded as invalid, drop all consecutive transactions from
+				// the same sender because of `nonce-too-high` clause.
+				log.Debug("Transaction failed, account skipped", "hash", tx.Hash(), "err", err)
 			}
 		}
-		// If we don't have enough gas for any further transactions then we're done.
-		if env.gasPool.Gas() < params.TxGas {
-			log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
-			break
-		}
-		// If we don't have enough blob space for any further blob transactions,
-		// skip that list altogether
-		if !blobTxs.Empty() && env.blobs*params.BlobTxBlobGasPerBlob >= params.MaxBlobGasPerBlock {
-			log.Trace("Not enough blob space for further blob transactions")
-			blobTxs.Clear()
-			// Fall though to pick up any plain txs
-		}
-		// Retrieve the next transaction and abort if all done.
-		var (
-			ltx *txpool.LazyTransaction
-			txs *transactionsByPriceAndNonce
-		)
-		pltx, ptip := plainTxs.Peek()
-		bltx, btip := blobTxs.Peek()
+	} else {
+		for {
+			// Check interruption signal and abort building if it's fired.
+			if interrupt != nil {
+				if signal := interrupt.Load(); signal != commitInterruptNone {
+					return signalToErr(signal)
+				}
+			}
+			// If we don't have enough gas for any further transactions then we're done.
+			if env.gasPool.Gas() < params.TxGas {
+				log.Trace("Not enough gas for further transactions", "have", env.gasPool, "want", params.TxGas)
+				break
+			}
+			// If we don't have enough blob space for any further blob transactions,
+			// skip that list altogether
+			if !blobTxs.Empty() && env.blobs*params.BlobTxBlobGasPerBlob >= params.MaxBlobGasPerBlock {
+				log.Trace("Not enough blob space for further blob transactions")
+				blobTxs.Clear()
+				// Fall though to pick up any plain txs
+			}
+			// Retrieve the next transaction and abort if all done.
+			var (
+				ltx *txpool.LazyTransaction
+				txs *transactionsByPriceAndNonce
+			)
+			pltx, ptip := plainTxs.Peek()
+			bltx, btip := blobTxs.Peek()
 
-		switch {
-		case pltx == nil:
-			txs, ltx = blobTxs, bltx
-		case bltx == nil:
-			txs, ltx = plainTxs, pltx
-		default:
-			if ptip.Lt(btip) {
+			switch {
+			case pltx == nil:
 				txs, ltx = blobTxs, bltx
-			} else {
+			case bltx == nil:
 				txs, ltx = plainTxs, pltx
+			default:
+				if ptip.Lt(btip) {
+					txs, ltx = blobTxs, bltx
+				} else {
+					txs, ltx = plainTxs, pltx
+				}
 			}
-		}
-		if ltx == nil {
-			break
-		}
-		// If we don't have enough space for the next transaction, skip the account.
-		if env.gasPool.Gas() < ltx.Gas {
-			log.Trace("Not enough gas left for transaction", "hash", ltx.Hash, "left", env.gasPool.Gas(), "needed", ltx.Gas)
-			txs.Pop()
-			continue
-		}
-		if left := uint64(params.MaxBlobGasPerBlock - env.blobs*params.BlobTxBlobGasPerBlob); left < ltx.BlobGas {
-			log.Trace("Not enough blob gas left for transaction", "hash", ltx.Hash, "left", left, "needed", ltx.BlobGas)
-			txs.Pop()
-			continue
-		}
-		// Transaction seems to fit, pull it up from the pool
-		tx := ltx.Resolve()
-		if tx == nil {
-			log.Trace("Ignoring evicted transaction", "hash", ltx.Hash)
-			txs.Pop()
-			continue
-		}
-		// Error may be ignored here. The error has already been checked
-		// during transaction acceptance is the transaction pool.
-		from, _ := types.Sender(env.signer, tx)
+			if ltx == nil {
+				break
+			}
+			// If we don't have enough space for the next transaction, skip the account.
+			if env.gasPool.Gas() < ltx.Gas {
+				log.Trace("Not enough gas left for transaction", "hash", ltx.Hash, "left", env.gasPool.Gas(), "needed", ltx.Gas)
+				txs.Pop()
+				continue
+			}
+			if left := uint64(params.MaxBlobGasPerBlock - env.blobs*params.BlobTxBlobGasPerBlob); left < ltx.BlobGas {
+				log.Trace("Not enough blob gas left for transaction", "hash", ltx.Hash, "left", left, "needed", ltx.BlobGas)
+				txs.Pop()
+				continue
+			}
+			// Transaction seems to fit, pull it up from the pool
+			tx := ltx.Resolve()
+			if tx == nil {
+				log.Trace("Ignoring evicted transaction", "hash", ltx.Hash)
+				txs.Pop()
+				continue
+			}
+			// Error may be ignored here. The error has already been checked
+			// during transaction acceptance is the transaction pool.
+			from, _ := types.Sender(env.signer, tx)
 
-		// Check whether the tx is replay protected. If we're not in the EIP155 hf
-		// phase, start ignoring the sender until we do.
-		if tx.Protected() && !w.chainConfig.IsEIP155(env.header.Number) {
-			log.Trace("Ignoring replay protected transaction", "hash", ltx.Hash, "eip155", w.chainConfig.EIP155Block)
-			txs.Pop()
-			continue
-		}
-		// Start executing the transaction
-		env.state.SetTxContext(tx.Hash(), env.tcount)
+			// Check whether the tx is replay protected. If we're not in the EIP155 hf
+			// phase, start ignoring the sender until we do.
+			if tx.Protected() && !w.chainConfig.IsEIP155(env.header.Number) {
+				log.Trace("Ignoring replay protected transaction", "hash", ltx.Hash, "eip155", w.chainConfig.EIP155Block)
+				txs.Pop()
+				continue
+			}
+			// Start executing the transaction
+			env.state.SetTxContext(tx.Hash(), env.tcount)
 
-		logs, err := w.commitTransaction(env, tx)
-		switch {
-		case errors.Is(err, core.ErrNonceTooLow):
-			// New head notification data race between the transaction pool and miner, shift
-			log.Trace("Skipping transaction with low nonce", "hash", ltx.Hash, "sender", from, "nonce", tx.Nonce())
-			txs.Shift()
+			logs, err := w.commitTransaction(env, tx)
+			switch {
+			case errors.Is(err, core.ErrNonceTooLow):
+				// New head notification data race between the transaction pool and miner, shift
+				log.Trace("Skipping transaction with low nonce", "hash", ltx.Hash, "sender", from, "nonce", tx.Nonce())
+				txs.Shift()
 
-		case errors.Is(err, nil):
-			// Everything ok, collect the logs and shift in the next transaction from the same account
-			coalescedLogs = append(coalescedLogs, logs...)
-			env.tcount++
-			txs.Shift()
+			case errors.Is(err, nil):
+				// Everything ok, collect the logs and shift in the next transaction from the same account
+				coalescedLogs = append(coalescedLogs, logs...)
+				env.tcount++
+				txs.Shift()
 
-		default:
-			// Transaction is regarded as invalid, drop all consecutive transactions from
-			// the same sender because of `nonce-too-high` clause.
-			log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
-			txs.Pop()
+			default:
+				// Transaction is regarded as invalid, drop all consecutive transactions from
+				// the same sender because of `nonce-too-high` clause.
+				log.Debug("Transaction failed, account skipped", "hash", ltx.Hash, "err", err)
+				txs.Pop()
+			}
 		}
 	}
 	if !w.isRunning() && len(coalescedLogs) > 0 {

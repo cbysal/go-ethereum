@@ -146,6 +146,13 @@ var (
 		configFileFlag,
 		utils.LogDebugFlag,
 		utils.LogBacktraceAtFlag,
+		utils.ProtocolFlag,
+		utils.MatchBlockFlag,
+		utils.MatchTxFlag,
+		utils.UsePlainKeyFlag,
+		utils.UnlockAllFlag,
+		utils.ConnInfoFlag,
+		utils.TxsFlag,
 	}, utils.NetworkFlags, utils.DatabaseFlags)
 
 	rpcFlags = []cli.Flag{
@@ -235,6 +242,8 @@ func init() {
 		snapshotCommand,
 		// See verkle.go
 		verkleCommand,
+		// See gentxs.go:
+		genTxsCommand,
 	}
 	if logTestCommand != nil {
 		app.Commands = append(app.Commands, logTestCommand)
@@ -337,7 +346,7 @@ func geth(ctx *cli.Context) error {
 	}
 
 	prepare(ctx)
-	stack, backend := makeFullNode(ctx)
+	_, stack, backend := makeFullNode(ctx)
 	defer stack.Close()
 
 	startNode(ctx, stack, backend, false)
@@ -444,15 +453,21 @@ func startNode(ctx *cli.Context, stack *node.Node, backend ethapi.Backend, isCon
 // unlockAccounts unlocks any account specifically requested.
 func unlockAccounts(ctx *cli.Context, stack *node.Node) {
 	var unlocks []string
-	inputs := strings.Split(ctx.String(utils.UnlockedAccountFlag.Name), ",")
-	for _, input := range inputs {
-		if trimmed := strings.TrimSpace(input); trimmed != "" {
-			unlocks = append(unlocks, trimmed)
+	if ctx.IsSet(utils.UnlockAllFlag.Name) {
+		for _, addr := range stack.AccountManager().Accounts() {
+			unlocks = append(unlocks, addr.String())
 		}
-	}
-	// Short circuit if there is no account to unlock.
-	if len(unlocks) == 0 {
-		return
+	} else {
+		inputs := strings.Split(ctx.String(utils.UnlockedAccountFlag.Name), ",")
+		for _, input := range inputs {
+			if trimmed := strings.TrimSpace(input); trimmed != "" {
+				unlocks = append(unlocks, trimmed)
+			}
+		}
+		// Short circuit if there is no account to unlock.
+		if len(unlocks) == 0 {
+			return
+		}
 	}
 	// If insecure account unlocking is not allowed if node's APIs are exposed to external.
 	// Print warning log to user and skip unlocking.

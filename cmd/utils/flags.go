@@ -21,8 +21,10 @@ import (
 	"context"
 	"crypto/ecdsa"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"math"
 	"math/big"
 	"net"
@@ -38,6 +40,7 @@ import (
 	"github.com/ethereum/go-ethereum/accounts/keystore"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/fdlimit"
+	"github.com/ethereum/go-ethereum/conf"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
@@ -99,7 +102,7 @@ var (
 	}
 	DBEngineFlag = &cli.StringFlag{
 		Name:     "db.engine",
-		Usage:    "Backing database implementation to use ('pebble' or 'leveldb')",
+		Usage:    "Backing database implementation to use ('badger' 'pebble' or 'leveldb')",
 		Value:    node.DefaultConfig.DBEngine,
 		Category: flags.EthCategory,
 	}
@@ -908,6 +911,46 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Value:    metrics.DefaultConfig.InfluxDBOrganization,
 		Category: flags.MetricsCategory,
 	}
+
+	// ECCB
+	ProtocolFlag = &cli.UintFlag{
+		Name:     "protocol",
+		Usage:    "Block broadcast protocol",
+		Value:    ethconfig.Defaults.Protocol,
+		Category: flags.EccbCategory,
+	}
+	MatchBlockFlag = &cli.Float64Flag{
+		Name:     "matchblock",
+		Usage:    "Probability of txpool matching a compact block",
+		Category: flags.EccbCategory,
+	}
+	MatchTxFlag = &cli.Float64Flag{
+		Name:     "matchtx",
+		Usage:    "Probability of txpool matching a transaction",
+		Category: flags.EccbCategory,
+	}
+
+	// Extra
+	UsePlainKeyFlag = &cli.BoolFlag{
+		Name:     "plainkey",
+		Usage:    "Use plain key",
+		Category: flags.ExtraCategory,
+	}
+	UnlockAllFlag = &cli.BoolFlag{
+		Name:     "unlockall",
+		Usage:    "Unlock all accounts",
+		Category: flags.ExtraCategory,
+	}
+	ConnInfoFlag = &cli.StringFlag{
+		Name:     "conn",
+		Usage:    "Specify the file containing connection information",
+		Category: flags.ExtraCategory,
+	}
+	TxsFlag = &cli.StringFlag{
+		Name:     "txs",
+		Usage:    "Specify the database containing transactions to be sealed",
+		Category: flags.ExtraCategory,
+	}
 )
 
 var (
@@ -1342,6 +1385,22 @@ func SetP2PConfig(ctx *cli.Context, cfg *p2p.Config) {
 		cfg.NoDiscovery = true
 		cfg.DiscoveryV5 = false
 	}
+
+	if ctx.IsSet(ConnInfoFlag.Name) {
+		file, err := os.Open(ctx.String(ConnInfoFlag.Name))
+		if err != nil {
+			Fatalf("Failed to open file: %v", err)
+		}
+		defer file.Close()
+		jsonBytes, err := io.ReadAll(file)
+		if err != nil {
+			Fatalf("Failed to read file: %v", err)
+		}
+		cfg.ConnInfo = new(p2p.ConnInfo)
+		if err = json.Unmarshal(jsonBytes, &cfg.ConnInfo); err != nil {
+			Fatalf("Failed to unmarshal JSON: %v", err)
+		}
+	}
 }
 
 // SetNodeConfig applies node-related command line flags to the config.
@@ -1387,8 +1446,8 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	}
 	if ctx.IsSet(DBEngineFlag.Name) {
 		dbEngine := ctx.String(DBEngineFlag.Name)
-		if dbEngine != "leveldb" && dbEngine != "pebble" {
-			Fatalf("Invalid choice for db.engine '%s', allowed 'leveldb' or 'pebble'", dbEngine)
+		if dbEngine != "leveldb" && dbEngine != "pebble" && dbEngine != "badger" {
+			Fatalf("Invalid choice for db.engine '%s', allowed 'leveldb' 'pebble' or 'badger'", dbEngine)
 		}
 		log.Info(fmt.Sprintf("Using %s as db engine", dbEngine))
 		cfg.DBEngine = dbEngine
@@ -1399,6 +1458,9 @@ func SetNodeConfig(ctx *cli.Context, cfg *node.Config) {
 	}
 	if ctx.IsSet(LogDebugFlag.Name) {
 		log.Warn("log.debug flag is deprecated")
+	}
+	if ctx.IsSet(UsePlainKeyFlag.Name) {
+		cfg.UsePlainKey = ctx.Bool(UsePlainKeyFlag.Name)
 	}
 }
 
@@ -1841,6 +1903,19 @@ func SetEthConfig(ctx *cli.Context, stack *node.Node, cfg *ethconfig.Config) {
 	log.Info("Initializing the KZG library", "backend", ctx.String(CryptoKZGFlag.Name))
 	if err := kzg4844.UseCKZG(ctx.String(CryptoKZGFlag.Name) == "ckzg"); err != nil {
 		Fatalf("Failed to set KZG library implementation to %s: %v", ctx.String(CryptoKZGFlag.Name), err)
+	}
+
+	if ctx.IsSet(ProtocolFlag.Name) {
+		cfg.Protocol = ctx.Uint(ProtocolFlag.Name)
+	}
+	if ctx.IsSet(MatchBlockFlag.Name) {
+		conf.MatchBlock = ctx.Float64(MatchBlockFlag.Name)
+	}
+	if ctx.IsSet(MatchTxFlag.Name) {
+		conf.MatchTx = ctx.Float64(MatchTxFlag.Name)
+	}
+	if ctx.IsSet(TxsFlag.Name) {
+		cfg.TxsDatabasePath = ctx.String(TxsFlag.Name)
 	}
 }
 

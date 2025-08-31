@@ -25,6 +25,7 @@ import (
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/eth/protocols/eth"
 	"github.com/ethereum/go-ethereum/p2p/enode"
 )
@@ -81,9 +82,16 @@ func (h *ethHandler) Handle(peer *eth.Peer, packet eth.Packet) error {
 	case *eth.PooledTransactionsResponse:
 		return h.txFetcher.Enqueue(peer.ID(), *packet, true)
 
+	case *eth.NewCompactBlockPacket:
+		return h.handleCompactBlockBroadcast(peer, packet.CompactBlock, packet.TD)
+
 	default:
 		return fmt.Errorf("unexpected eth packet type: %T", packet)
 	}
+}
+
+func (h *ethHandler) Protocol() uint {
+	return h.protocol
 }
 
 // handleBlockAnnounces is invoked from a peer's message handler when it transmits a
@@ -107,7 +115,12 @@ func (h *ethHandler) handleBlockAnnounces(peer *eth.Peer, hashes []common.Hash, 
 		}
 	}
 	for i := 0; i < len(unknownHashes); i++ {
-		h.blockFetcher.Notify(peer.ID(), unknownHashes[i], unknownNumbers[i], time.Now(), peer.RequestOneHeader, peer.RequestBodies)
+		switch peer.Version() {
+		case eth.ETH68:
+			h.blockFetcher.Notify(peer.ID(), unknownHashes[i], unknownNumbers[i], time.Now(), peer.RequestOneHeader, peer.RequestBodies)
+		case eth.ETH69, eth.ETH70:
+			h.compactBlockFetcher.Notify(peer.ID(), unknownHashes[i], unknownNumbers[i], peer.RequestCompactBlock, peer.RequestBlockTransactions, peer.RequestChunks)
+		}
 	}
 	return nil
 }
@@ -131,6 +144,23 @@ func (h *ethHandler) handleBlockBroadcast(peer *eth.Peer, block *types.Block, td
 		trueTD   = new(big.Int).Sub(td, block.Difficulty())
 	)
 	// Update the peer's total difficulty if better than the previous
+	if _, td := peer.Head(); trueTD.Cmp(td) > 0 {
+		peer.SetHead(trueHead, trueTD)
+		h.chainSync.handlePeerEvent()
+	}
+	return nil
+}
+
+func (h *ethHandler) handleCompactBlockBroadcast(peer *eth.Peer, compactBlock *eccb.CompactBlock, td *big.Int) error {
+	if h.merger.PoSFinalized() {
+		return errors.New("disallowed compact block broadcast")
+	}
+	h.compactBlockFetcher.Enqueue(peer.ID(), compactBlock, peer.RequestBlockTransactions, peer.RequestChunks)
+
+	var (
+		trueHead = compactBlock.ParentHash()
+		trueTD   = new(big.Int).Sub(td, compactBlock.Difficulty())
+	)
 	if _, td := peer.Head(); trueTD.Cmp(td) > 0 {
 		peer.SetHead(trueHead, trueTD)
 		h.chainSync.handlePeerEvent()

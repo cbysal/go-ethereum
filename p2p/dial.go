@@ -58,9 +58,13 @@ type nodeResolver interface {
 	Resolve(*enode.Node) *enode.Node
 }
 
+type Dialer interface {
+	DialContext(ctx context.Context, network, address string) (net.Conn, error)
+}
+
 // tcpDialer implements NodeDialer using real TCP connections.
 type tcpDialer struct {
-	d *net.Dialer
+	d Dialer
 }
 
 func (t tcpDialer) Dial(ctx context.Context, dest *enode.Node) (net.Conn, error) {

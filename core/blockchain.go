@@ -1698,7 +1698,7 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 		// snapshot layer is missing, forcibly rerun the execution to build it.
 		if bc.skipBlock(err, it) {
 			logger := log.Debug
-			if bc.chainConfig.Clique == nil {
+			if bc.chainConfig.Clique == nil && bc.chainConfig.Solo == nil {
 				logger = log.Warn
 			}
 			logger("Inserted known block", "number", block.Number(), "hash", block.Hash(),
@@ -1885,6 +1885,20 @@ func (bc *BlockChain) insertChain(chain types.Blocks, setHead bool) (int, error)
 	stats.ignored += it.remaining()
 
 	return it.index, err
+}
+
+func (bc *BlockChain) InsertChainFromBroadcast(chain types.Blocks) (int, error) {
+	for _, block := range chain {
+		rawdb.WriteTd(bc.db, block.Hash(), block.NumberU64(), new(big.Int).Add(block.Number(), big.NewInt(1)))
+		rawdb.WriteBlock(bc.db, block)
+		rawdb.WriteCanonicalHash(bc.db, block.Hash(), block.NumberU64())
+		bc.hc.SetCurrentHeader(block.Header())
+		bc.currentSnapBlock.Store(block.Header())
+		bc.currentBlock.Store(block.Header())
+		bc.chainFeed.Send(ChainEvent{Block: block, Hash: block.Hash(), Logs: []*types.Log{}})
+		bc.chainHeadFeed.Send(ChainHeadEvent{Block: block})
+	}
+	return len(chain), nil
 }
 
 // insertSideChain is called when an import batch hits upon a pruned ancestor

@@ -24,21 +24,25 @@ import (
 	"runtime"
 	"sync"
 
+	"github.com/dgraph-io/badger/v4"
 	"github.com/ethereum/go-ethereum/accounts"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/ethereum/go-ethereum/consensus"
 	"github.com/ethereum/go-ethereum/consensus/beacon"
 	"github.com/ethereum/go-ethereum/consensus/clique"
+	"github.com/ethereum/go-ethereum/consensus/solo"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/bloombits"
 	"github.com/ethereum/go-ethereum/core/rawdb"
 	"github.com/ethereum/go-ethereum/core/state/pruner"
 	"github.com/ethereum/go-ethereum/core/txpool"
 	"github.com/ethereum/go-ethereum/core/txpool/blobpool"
+	"github.com/ethereum/go-ethereum/core/txpool/hashpool"
 	"github.com/ethereum/go-ethereum/core/txpool/legacypool"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/core/vm"
+	"github.com/ethereum/go-ethereum/eccb"
 	"github.com/ethereum/go-ethereum/eth/downloader"
 	"github.com/ethereum/go-ethereum/eth/ethconfig"
 	"github.com/ethereum/go-ethereum/eth/gasprice"
@@ -101,6 +105,8 @@ type Ethereum struct {
 	lock sync.RWMutex // Protects the variadic fields (e.g. gas price and etherbase)
 
 	shutdownTracker *shutdowncheck.ShutdownTracker // Tracks if and when the node has shutdown ungracefully
+
+	txsDb *badger.DB
 }
 
 // New creates a new Ethereum object (including the
@@ -219,17 +225,31 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 	}
 	eth.bloomIndexer.Start(eth.blockchain)
 
-	if config.BlobPool.Datadir != "" {
-		config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
-	}
-	blobPool := blobpool.New(config.BlobPool, eth.blockchain)
+	var subpools []txpool.SubPool
+	if config.TxsDatabasePath != "" {
+		eth.txsDb, err = eccb.OpenDatabase(config.TxsDatabasePath, true)
+		if err != nil {
+			return nil, err
+		}
 
-	if config.TxPool.Journal != "" {
-		config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
-	}
-	legacyPool := legacypool.New(config.TxPool, eth.blockchain)
+		hashPool := hashpool.New(eth.txsDb)
 
-	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, []txpool.SubPool{legacyPool, blobPool})
+		subpools = []txpool.SubPool{hashPool}
+	} else {
+		if config.BlobPool.Datadir != "" {
+			config.BlobPool.Datadir = stack.ResolvePath(config.BlobPool.Datadir)
+		}
+		blobPool := blobpool.New(config.BlobPool, eth.blockchain)
+
+		if config.TxPool.Journal != "" {
+			config.TxPool.Journal = stack.ResolvePath(config.TxPool.Journal)
+		}
+		legacyPool := legacypool.New(config.TxPool, eth.blockchain)
+
+		subpools = []txpool.SubPool{legacyPool, blobPool}
+	}
+
+	eth.txPool, err = txpool.New(config.TxPool.PriceLimit, eth.blockchain, subpools)
 	if err != nil {
 		return nil, err
 	}
@@ -245,11 +265,12 @@ func New(stack *node.Node, config *ethconfig.Config) (*Ethereum, error) {
 		BloomCache:     uint64(cacheLimit),
 		EventMux:       eth.eventMux,
 		RequiredBlocks: config.RequiredBlocks,
+		Protocol:       config.Protocol,
 	}); err != nil {
 		return nil, err
 	}
 
-	eth.miner = miner.New(eth, &config.Miner, eth.blockchain.Config(), eth.EventMux(), eth.engine, eth.isLocalBlock)
+	eth.miner = miner.New(eth, &config.Miner, eth.blockchain.Config(), eth.txsDb, eth.EventMux(), eth.engine, eth.isLocalBlock)
 	eth.miner.SetExtra(makeExtraData(config.Miner.ExtraData))
 
 	eth.APIBackend = &EthAPIBackend{stack.Config().ExtRPCEnabled(), stack.Config().AllowUnprotectedTxs, eth, nil}
@@ -402,6 +423,9 @@ func (s *Ethereum) shouldPreserve(header *types.Header) bool {
 	if _, ok := s.engine.(*clique.Clique); ok {
 		return false
 	}
+	if _, ok := s.engine.(*solo.Solo); ok {
+		return false
+	}
 	return s.isLocalBlock(header)
 }
 
@@ -547,6 +571,10 @@ func (s *Ethereum) Stop() error {
 
 	s.chainDb.Close()
 	s.eventMux.Stop()
+
+	if s.txsDb != nil {
+		s.txsDb.Close()
+	}
 
 	return nil
 }

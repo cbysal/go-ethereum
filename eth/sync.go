@@ -91,8 +91,10 @@ func (cs *chainSyncer) loop() {
 	defer cs.handler.wg.Done()
 
 	cs.handler.blockFetcher.Start()
+	cs.handler.compactBlockFetcher.Start()
 	cs.handler.txFetcher.Start()
 	defer cs.handler.blockFetcher.Stop()
+	defer cs.handler.compactBlockFetcher.Stop()
 	defer cs.handler.txFetcher.Stop()
 	defer cs.handler.downloader.Terminate()
 

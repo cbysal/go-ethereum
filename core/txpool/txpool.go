@@ -23,6 +23,7 @@ import (
 	"sync"
 
 	"github.com/ethereum/go-ethereum/common"
+	"github.com/ethereum/go-ethereum/common/lru"
 	"github.com/ethereum/go-ethereum/core"
 	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/event"
@@ -70,6 +71,9 @@ type TxPool struct {
 	reservations map[common.Address]SubPool // Map with the account to pool reservations
 	reserveLock  sync.Mutex                 // Lock protecting the account reservations
 
+	knownTxsLRU lru.BasicLRU[common.Hash, []bool]
+	knownTxsMu  sync.Mutex
+
 	subs event.SubscriptionScope // Subscription scope to unsubscribe all on shutdown
 	quit chan chan error         // Quit channel to tear down the head updater
 	term chan struct{}           // Termination channel to detect a closed pool
@@ -88,6 +92,7 @@ func New(gasTip uint64, chain BlockChain, subpools []SubPool) (*TxPool, error) {
 	pool := &TxPool{
 		subpools:     subpools,
 		reservations: make(map[common.Address]SubPool),
+		knownTxsLRU:  lru.NewBasicLRU[common.Hash, []bool](32),
 		quit:         make(chan chan error),
 		term:         make(chan struct{}),
 		sync:         make(chan chan error),
@@ -243,6 +248,15 @@ func (p *TxPool) loop(head *types.Header, chain BlockChain) {
 		select {
 		case event := <-newHeadCh:
 			// Chain moved forward, store the head for later consumption
+			p.knownTxsMu.Lock()
+			if !p.knownTxsLRU.Contains(event.Block.Hash()) {
+				knownTxs := make([]bool, event.Block.Transactions().Len())
+				for i, tx := range event.Block.Transactions() {
+					knownTxs[i] = p.Get(tx.Hash()) != nil
+				}
+				p.knownTxsLRU.Add(event.Block.Hash(), knownTxs)
+			}
+			p.knownTxsMu.Unlock()
 			newHead = event.Block.Header()
 
 		case head := <-resetDone:
@@ -303,6 +317,20 @@ func (p *TxPool) Get(hash common.Hash) *types.Transaction {
 		}
 	}
 	return nil
+}
+
+func (p *TxPool) GetKnownTxs(block *types.Block) []bool {
+	p.knownTxsMu.Lock()
+	knownTxs, ok := p.knownTxsLRU.Get(block.Hash())
+	if !ok {
+		knownTxs = make([]bool, block.Transactions().Len())
+		for i, tx := range block.Transactions() {
+			knownTxs[i] = p.Get(tx.Hash()) != nil
+		}
+		p.knownTxsLRU.Add(block.Hash(), knownTxs)
+	}
+	p.knownTxsMu.Unlock()
+	return knownTxs
 }
 
 // Add enqueues a batch of transactions into the pool if they are valid. Due
