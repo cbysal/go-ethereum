@@ -18,6 +18,7 @@
 package state
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"maps"
@@ -140,6 +141,18 @@ type StateDB struct {
 	// State witness if cross validation is needed
 	witness      *stateless.Witness
 	witnessStats *stateless.WitnessStats
+
+	GetNonces   map[common.Address]struct{}
+	GetBalances map[common.Address]struct{}
+	GetCodes    map[common.Address]struct{}
+	GetStates   map[common.Address]map[common.Hash]struct{}
+	Exists      map[common.Address]struct{}
+	Empties     map[common.Address]struct{}
+
+	AccountReadSet  map[common.Address]struct{}
+	AccountWriteSet map[common.Address]struct{}
+	StorageReadSet  map[common.AddrHash]struct{}
+	StorageWriteSet map[common.AddrHash]struct{}
 
 	// Measurements gathered during execution for debugging purposes
 	AccountReads    time.Duration
@@ -321,18 +334,36 @@ func (s *StateDB) SubRefund(gas uint64) {
 // Exist reports whether the given account address exists in the state.
 // Notably this also returns true for self-destructed accounts within the current transaction.
 func (s *StateDB) Exist(addr common.Address) bool {
+	if s.Exists != nil {
+		s.Exists[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	return s.getStateObject(addr) != nil
 }
 
 // Empty returns whether the state object is either non-existent
 // or empty according to the EIP161 specification (balance = nonce = code = 0)
 func (s *StateDB) Empty(addr common.Address) bool {
+	if s.Empties != nil {
+		s.Empties[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	so := s.getStateObject(addr)
 	return so == nil || so.empty()
 }
 
 // GetBalance retrieves the balance from the given address or 0 if object not found
 func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
+	if s.GetBalances != nil {
+		s.GetBalances[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Balance()
@@ -342,6 +373,12 @@ func (s *StateDB) GetBalance(addr common.Address) *uint256.Int {
 
 // GetNonce retrieves the nonce from the given address or 0 if object not found
 func (s *StateDB) GetNonce(addr common.Address) uint64 {
+	if s.GetNonces != nil {
+		s.GetNonces[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.Nonce()
@@ -366,6 +403,12 @@ func (s *StateDB) TxIndex() int {
 }
 
 func (s *StateDB) GetCode(addr common.Address) []byte {
+	if s.GetCodes != nil {
+		s.GetCodes[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		if s.witness != nil {
@@ -377,6 +420,12 @@ func (s *StateDB) GetCode(addr common.Address) []byte {
 }
 
 func (s *StateDB) GetCodeSize(addr common.Address) int {
+	if s.GetCodes != nil {
+		s.GetCodes[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		if s.witness != nil {
@@ -388,6 +437,12 @@ func (s *StateDB) GetCodeSize(addr common.Address) int {
 }
 
 func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
+	if s.GetCodes != nil {
+		s.GetCodes[addr] = struct{}{}
+	}
+	if s.AccountReadSet != nil {
+		s.AccountReadSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return common.BytesToHash(stateObject.CodeHash())
@@ -397,6 +452,15 @@ func (s *StateDB) GetCodeHash(addr common.Address) common.Hash {
 
 // GetState retrieves the value associated with the specific key.
 func (s *StateDB) GetState(addr common.Address, hash common.Hash) common.Hash {
+	if s.GetStates != nil {
+		if _, ok := s.GetStates[addr]; !ok {
+			s.GetStates[addr] = make(map[common.Hash]struct{})
+		}
+		s.GetStates[addr][hash] = struct{}{}
+	}
+	if s.StorageReadSet != nil {
+		s.StorageReadSet[common.AddrHash{Addr: addr, Hash: hash}] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	if stateObject != nil {
 		return stateObject.GetState(hash)
@@ -448,6 +512,9 @@ func (s *StateDB) HasSelfDestructed(addr common.Address) bool {
 
 // AddBalance adds amount to the account associated with addr.
 func (s *StateDB) AddBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject == nil {
 		return uint256.Int{}
@@ -457,6 +524,9 @@ func (s *StateDB) AddBalance(addr common.Address, amount *uint256.Int, reason tr
 
 // SubBalance subtracts amount from the account associated with addr.
 func (s *StateDB) SubBalance(addr common.Address, amount *uint256.Int, reason tracing.BalanceChangeReason) uint256.Int {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject == nil {
 		return uint256.Int{}
@@ -475,6 +545,9 @@ func (s *StateDB) SetBalance(addr common.Address, amount *uint256.Int, reason tr
 }
 
 func (s *StateDB) SetNonce(addr common.Address, nonce uint64, reason tracing.NonceChangeReason) {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		stateObject.SetNonce(nonce)
@@ -482,6 +555,9 @@ func (s *StateDB) SetNonce(addr common.Address, nonce uint64, reason tracing.Non
 }
 
 func (s *StateDB) SetCode(addr common.Address, code []byte, reason tracing.CodeChangeReason) (prev []byte) {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	stateObject := s.getOrNewStateObject(addr)
 	if stateObject != nil {
 		return stateObject.SetCode(crypto.Keccak256Hash(code), code)
@@ -490,6 +566,9 @@ func (s *StateDB) SetCode(addr common.Address, code []byte, reason tracing.CodeC
 }
 
 func (s *StateDB) SetState(addr common.Address, key, value common.Hash) common.Hash {
+	if s.StorageWriteSet != nil {
+		s.StorageWriteSet[common.AddrHash{Addr: addr, Hash: key}] = struct{}{}
+	}
 	if stateObject := s.getOrNewStateObject(addr); stateObject != nil {
 		return stateObject.SetState(key, value)
 	}
@@ -531,6 +610,9 @@ func (s *StateDB) SetStorage(addr common.Address, storage map[common.Hash]common
 // The account's state object is still available until the state is committed,
 // getStateObject will return a non-nil account after SelfDestruct.
 func (s *StateDB) SelfDestruct(addr common.Address) uint256.Int {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	stateObject := s.getStateObject(addr)
 	var prevBalance uint256.Int
 	if stateObject == nil {
@@ -671,6 +753,9 @@ func (s *StateDB) createObject(addr common.Address) *stateObject {
 // exists, this function will silently overwrite it which might lead to a
 // consensus bug eventually.
 func (s *StateDB) CreateAccount(addr common.Address) {
+	if s.AccountWriteSet != nil {
+		s.AccountWriteSet[addr] = struct{}{}
+	}
 	s.createObject(addr)
 }
 
@@ -750,6 +835,27 @@ func (s *StateDB) Copy() *StateDB {
 	return state
 }
 
+func (s *StateDB) CopyForMerge() *StateDB {
+	state := &StateDB{
+		stateObjects: make(map[common.Address]*stateObject, len(s.journal.dirties)),
+		journal:      s.journal.copy(),
+		GetNonces:    s.GetNonces,
+		GetBalances:  s.GetBalances,
+		GetCodes:     s.GetCodes,
+		GetStates:    s.GetStates,
+		Exists:       s.Exists,
+		Empties:      s.Empties,
+	}
+	for addr := range s.journal.dirties {
+		obj, exist := s.stateObjects[addr]
+		if !exist {
+			continue
+		}
+		state.stateObjects[addr] = obj.deepCopyForMerge()
+	}
+	return state
+}
+
 // Snapshot returns an identifier for the current revision of the state.
 func (s *StateDB) Snapshot() int {
 	return s.journal.snapshot()
@@ -781,6 +887,17 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) {
 			// Thus, we can safely ignore it here
 			continue
 		}
+		if obj.origin != nil {
+			obj.nonceDelta += obj.data.Nonce - obj.origin.Nonce
+			obj.data.Nonce = obj.origin.Nonce
+			obj.balanceDelta = new(uint256.Int).Add(obj.balanceDelta, new(uint256.Int).Sub(obj.data.Balance, obj.origin.Balance))
+			obj.data.Balance = new(uint256.Int).Set(obj.origin.Balance)
+		} else {
+			obj.nonceDelta += obj.data.Nonce
+			obj.data.Nonce = 0
+			obj.balanceDelta = new(uint256.Int).Add(obj.balanceDelta, obj.data.Balance)
+			obj.data.Balance = new(uint256.Int)
+		}
 		if obj.selfDestructed || (deleteEmptyObjects && obj.empty()) {
 			delete(s.stateObjects, obj.address)
 			s.markDelete(addr)
@@ -806,6 +923,208 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) {
 	}
 	// Invalidate journal because reverting across transactions is not allowed.
 	s.clearJournalAndRefund()
+}
+
+var emptyStateAccount = types.NewEmptyStateAccount()
+
+func (s *StateDB) FinaliseForParallelExecution(deleteEmptyObjects bool, statedb *StateDB) {
+	updates := make([]common.Address, 0)
+	for addr := range statedb.journal.dirties {
+		delta, exist := statedb.stateObjects[addr]
+		if !exist {
+			continue
+		}
+		if delta.selfDestructed {
+			obj, ok := s.stateObjects[addr]
+			if ok {
+				delete(s.stateObjects, addr)
+				s.stateObjectsDestruct[addr] = obj
+				obj.origin = nil
+				obj.selfDestructed = true
+			} else {
+				s.stateObjectsDestruct[addr] = delta
+			}
+			s.mutations[addr] = &mutation{deletion, false}
+			continue
+		}
+		obj, ok := s.stateObjects[addr]
+		if !ok {
+			obj = newObjectWithAddrHash(s, addr, delta.origin, delta.addrHash)
+			s.stateObjects[addr] = obj
+		}
+		origin := delta.origin
+		if origin == nil {
+			origin = emptyStateAccount
+		}
+		if delta.data.Nonce != origin.Nonce {
+			obj.data.Nonce += delta.data.Nonce - origin.Nonce
+		}
+		if !delta.data.Balance.Eq(origin.Balance) {
+			newBalance := new(uint256.Int).Add(obj.data.Balance, delta.data.Balance)
+			obj.data.Balance = newBalance.Sub(newBalance, origin.Balance)
+		}
+		if delta.dirtyCode {
+			obj.code = delta.code
+			obj.data.CodeHash = delta.data.CodeHash
+			obj.dirtyCode = true
+		}
+		for key, newValue := range delta.dirtyStorage {
+			oldValue, ok := delta.pendingStorage[key]
+			if !ok {
+				oldValue = delta.originStorage[key]
+			}
+			if newValue != oldValue {
+				value, ok := obj.pendingStorage[key]
+				if !ok {
+					value, ok = obj.originStorage[key]
+					if !ok {
+						value = delta.originStorage[key]
+						obj.originStorage[key] = value
+					}
+				}
+				if _, ok = obj.uncommittedStorage[key]; !ok {
+					obj.uncommittedStorage[key] = value
+				}
+				obj.pendingStorage[key] = common.AddHash(value, common.SubHash(newValue, oldValue))
+			}
+		}
+		updates = append(updates, addr)
+	}
+	if deleteEmptyObjects {
+		for _, addr := range updates {
+			obj := s.stateObjects[addr]
+			if obj != nil {
+				if !obj.empty() {
+					s.mutations[addr] = &mutation{update, false}
+				} else {
+					delete(s.stateObjects, addr)
+					if _, ok := s.stateObjectsDestruct[addr]; !ok {
+						s.stateObjectsDestruct[addr] = obj
+					}
+					obj.origin = nil
+					s.mutations[addr] = &mutation{deletion, false}
+				}
+			}
+		}
+	} else {
+		for _, addr := range updates {
+			obj := s.stateObjects[addr]
+			if obj != nil {
+				s.mutations[addr] = &mutation{update, false}
+			}
+		}
+	}
+}
+
+func (s *StateDB) MergeState(statedb *StateDB) {
+	for addr := range statedb.journal.dirties {
+		delta, exist := statedb.stateObjects[addr]
+		if !exist {
+			continue
+		}
+		if delta.selfDestructed {
+			obj, ok := s.stateObjects[addr]
+			if ok {
+				delete(s.stateObjects, addr)
+				s.stateObjectsDestruct[addr] = obj
+				obj.origin = nil
+				obj.selfDestructed = true
+			} else {
+				s.stateObjectsDestruct[addr] = delta
+			}
+			s.mutations[addr] = &mutation{deletion, false}
+			continue
+		}
+		obj, ok := s.stateObjects[addr]
+		if !ok {
+			obj = newObjectWithAddrHash(s, addr, delta.origin, delta.addrHash)
+			s.stateObjects[addr] = obj
+		}
+		origin := delta.origin
+		if origin == nil {
+			origin = emptyStateAccount
+		}
+		if delta.data.Nonce != origin.Nonce {
+			obj.nonceDelta += delta.data.Nonce - origin.Nonce
+		}
+		if !delta.data.Balance.Eq(origin.Balance) {
+			obj.balanceDelta.Add(obj.balanceDelta, delta.data.Balance).Sub(obj.balanceDelta, origin.Balance)
+		}
+		if delta.dirtyCode {
+			obj.code = delta.code
+			obj.data.CodeHash = delta.data.CodeHash
+		}
+		for key, newValue := range delta.dirtyStorage {
+			oldValue, ok := delta.pendingStorage[key]
+			if !ok {
+				oldValue = delta.originStorage[key]
+			}
+			if newValue != oldValue {
+				value, ok := obj.pendingStorage[key]
+				if !ok {
+					value, ok = obj.originStorage[key]
+					if !ok {
+						value = delta.originStorage[key]
+						obj.originStorage[key] = value
+					}
+				}
+				if _, ok = obj.uncommittedStorage[key]; !ok {
+					obj.uncommittedStorage[key] = value
+				}
+				obj.pendingStorage[key] = common.AddHash(value, common.SubHash(newValue, oldValue))
+			}
+		}
+	}
+}
+
+func (s *StateDB) WriteMap() (map[common.Address]struct{}, map[common.Address]uint64, map[common.Address]*uint256.Int, map[common.Address][]byte, map[common.Address]Storage, map[common.Address]struct{}) {
+	createAccounts := make(map[common.Address]struct{})
+	nonces := make(map[common.Address]uint64)
+	balances := make(map[common.Address]*uint256.Int)
+	codes := make(map[common.Address][]byte)
+	storages := make(map[common.Address]Storage)
+	selfDestructs := make(map[common.Address]struct{})
+	for addr := range s.journal.dirties {
+		obj, exist := s.stateObjects[addr]
+		if !exist {
+			continue
+		}
+		if obj.selfDestructed {
+			selfDestructs[addr] = struct{}{}
+			continue
+		}
+		origin := obj.origin
+		if origin == nil {
+			origin = types.NewEmptyStateAccount()
+			createAccounts[addr] = struct{}{}
+		}
+		if obj.data.Nonce != origin.Nonce {
+			nonces[addr] += obj.data.Nonce - origin.Nonce
+		}
+		if !obj.data.Balance.Eq(origin.Balance) {
+			if balance, ok := balances[addr]; ok {
+				balances[addr] = new(uint256.Int).Add(balance, new(uint256.Int).Sub(obj.data.Balance, origin.Balance))
+			} else {
+				balances[addr] = new(uint256.Int).Sub(obj.data.Balance, origin.Balance)
+			}
+		}
+		if obj.dirtyCode {
+			codes[addr] = obj.code
+		}
+		for key, newValue := range obj.dirtyStorage {
+			oldValue, ok := obj.pendingStorage[key]
+			if !ok {
+				oldValue = obj.originStorage[key]
+			}
+			if newValue != oldValue {
+				if _, ok = storages[addr]; !ok {
+					storages[addr] = make(Storage)
+				}
+				storages[addr][key] = common.AddHash(storages[addr][key], common.SubHash(newValue, oldValue))
+			}
+		}
+	}
+	return createAccounts, nonces, balances, codes, storages, selfDestructs
 }
 
 // IntermediateRoot computes the current root hash of the state trie.
@@ -1409,6 +1728,10 @@ func (s *StateDB) Commit(block uint64, deleteEmptyObjects bool, noStorageWiping 
 			if s.mutations[addr] == nil || s.mutations[addr].isDelete() {
 				continue
 			}
+			object.data.Nonce += object.nonceDelta
+			object.nonceDelta = 0
+			object.data.Balance = new(uint256.Int).Add(object.data.Balance, object.balanceDelta)
+			object.balanceDelta.Clear()
 			for key, value := range object.pendingStorage {
 				if err := s.slim.WriteStorage(addr, key, value); err != nil {
 					return common.Hash{}, err
@@ -1440,6 +1763,37 @@ func (s *StateDB) CommitWithUpdate(block uint64, deleteEmptyObjects bool, noStor
 		return common.Hash{}, nil, err
 	}
 	return ret.root, ret, nil
+}
+
+func (s *StateDB) PendingStates(deleteEmptyObjects bool) (map[common.Address]*types.StateAccount, map[common.AddrHash]common.Hash, map[common.Hash][]byte) {
+	s.Finalise(deleteEmptyObjects)
+	accountUpdates := make(map[common.Address]*types.StateAccount)
+	storageUpdates := make(map[common.AddrHash]common.Hash)
+	codeUpdates := make(map[common.Hash][]byte)
+	for addr, obj := range s.stateObjectsDestruct {
+		if !obj.empty() {
+			accountUpdates[addr] = nil
+		}
+	}
+	for addr, obj := range s.stateObjects {
+		if s.mutations[addr] == nil || s.mutations[addr].isDelete() {
+			continue
+		}
+		obj.data.Nonce += obj.nonceDelta
+		obj.nonceDelta = 0
+		obj.data.Balance = new(uint256.Int).Add(obj.data.Balance, obj.balanceDelta)
+		obj.balanceDelta.Clear()
+		for key, value := range obj.pendingStorage {
+			storageUpdates[common.AddrHash{Addr: addr, Hash: key}] = value
+		}
+		if obj.dirtyCode {
+			codeUpdates[common.BytesToHash(obj.data.CodeHash)] = obj.code
+		}
+		if obj.origin == nil || obj.data.Nonce != obj.origin.Nonce || !obj.data.Balance.Eq(obj.origin.Balance) || !bytes.Equal(obj.data.CodeHash, obj.origin.CodeHash) {
+			accountUpdates[addr] = &obj.data
+		}
+	}
+	return accountUpdates, storageUpdates, codeUpdates
 }
 
 // Prepare handles the preparatory steps for executing a state transition with.

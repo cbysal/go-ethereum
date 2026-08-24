@@ -214,6 +214,9 @@ type Block struct {
 	// that process it.
 	witness *ExecutionWitness
 
+	conflicts    *Conflicts
+	preloadSlots *PreloadSlots
+
 	// caches
 	hash atomic.Pointer[common.Hash]
 	size atomic.Uint64
@@ -330,6 +333,20 @@ func CopyHeader(h *Header) *Header {
 		*cpy.RequestsHash = *h.RequestsHash
 	}
 	return &cpy
+}
+
+func (b *Block) SetConflicts(conflicts *Conflicts) {
+	b.conflicts = conflicts
+}
+
+func (b *Block) Conflicts() *Conflicts { return b.conflicts }
+
+func (b *Block) SetPreloadSlots(preloadSlotsList *PreloadSlots) {
+	b.preloadSlots = preloadSlotsList
+}
+
+func (b *Block) PreloadSlots() []common.Pair[common.Address, []common.Hash] {
+	return b.preloadSlots.SlotsList
 }
 
 // DecodeRLP decodes a block from RLP.

@@ -19,8 +19,10 @@ package core
 import (
 	"fmt"
 	"math/big"
+	"runtime"
 	"slices"
 	"strings"
+	"sync/atomic"
 
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/consensus/misc"
@@ -31,6 +33,7 @@ import (
 	"github.com/ethereum/go-ethereum/crypto"
 	"github.com/ethereum/go-ethereum/params"
 	"github.com/holiman/uint256"
+	"golang.org/x/sync/errgroup"
 )
 
 // StateProcessor is a basic Processor, which takes care of transitioning
@@ -39,6 +42,7 @@ import (
 // StateProcessor implements Processor.
 type StateProcessor struct {
 	chain       ChainContext // Chain context interface
+	mode        int
 	GasUsedList []uint64
 }
 
@@ -47,6 +51,10 @@ func NewStateProcessor(chain ChainContext) *StateProcessor {
 	return &StateProcessor{
 		chain: chain,
 	}
+}
+
+func (p *StateProcessor) SetMode(mode int) {
+	p.mode = mode
 }
 
 // chainConfig returns the chain configuration.
@@ -75,8 +83,10 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	)
 
 	// Mutate the block and state according to any hard-fork specs
+	isDAOBlock := false
 	if config.DAOForkSupport && config.DAOForkBlock != nil && config.DAOForkBlock.Cmp(block.Number()) == 0 {
 		misc.ApplyDAOHardFork(statedb)
+		isDAOBlock = true
 	}
 	var (
 		context vm.BlockContext
@@ -107,57 +117,193 @@ func (p *StateProcessor) Process(block *types.Block, statedb *state.StateDB, cfg
 	}
 
 	// Iterate over and process the individual transactions
-	var txs types.Transactions
-	if !cfg.IsPreExec {
-		txs = block.Transactions()
-	} else {
-		txs = make(types.Transactions, 0, block.Transactions().Len())
-		for i, tx := range block.Transactions() {
-			if !cfg.Privates.Test(uint(i)) {
-				txs = append(txs, tx)
+	if p.mode != 0 && !isDAOBlock {
+		var wg errgroup.Group
+
+		txNum := block.Transactions().Len()
+		receipts = make(types.Receipts, txNum)
+		conflicts := block.Conflicts()
+
+		completes1 := make([]chan struct{}, txNum)
+		completes2 := make([]chan struct{}, txNum)
+		for i := range txNum {
+			completes1[i] = make(chan struct{})
+			completes2[i] = make(chan struct{})
+		}
+
+		statedbBase := statedb.Copy()
+		msgs := make([]*Message, txNum)
+		statedbs := make([]*state.StateDB, txNum)
+		var cur atomic.Uint64
+		for range runtime.NumCPU() {
+			wg.Go(func() error {
+				for i := int(cur.Add(1)) - 1; i < block.Transactions().Len(); i = int(cur.Add(1)) - 1 {
+					var err error
+					tx := block.Transactions()[i]
+					msgs[i], err = TransactionToMessage(tx, signer, block.BaseFee())
+					if err != nil {
+						return fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+					}
+					statedbs[i] = statedbBase.Copy()
+					close(completes1[i])
+				}
+				return nil
+			})
+		}
+
+		if p.mode == 3 {
+			preloadSlots := block.PreloadSlots()
+			reader := statedb.Reader()
+			preloadSlotCh := make(chan common.Pair[*common.Address, *common.Hash])
+			wg.Go(func() error {
+				for _, slots := range preloadSlots {
+					preloadSlotCh <- common.Pair[*common.Address, *common.Hash]{First: &slots.First}
+					for _, slot := range slots.Second {
+						preloadSlotCh <- common.Pair[*common.Address, *common.Hash]{
+							First:  &slots.First,
+							Second: &slot,
+						}
+					}
+				}
+				close(preloadSlotCh)
+				return nil
+			})
+			for range runtime.NumCPU() {
+				wg.Go(func() error {
+					for slot := range preloadSlotCh {
+						if slot.Second == nil {
+							reader.Account(*slot.First)
+						} else {
+							reader.Storage(*slot.First, *slot.Second)
+						}
+					}
+					return nil
+				})
 			}
 		}
-		slices.SortFunc(txs, func(a, b *types.Transaction) int {
-			return -a.EffectiveGasTipCmp(b, uint256.MustFromBig(block.BaseFee()))
-		})
-	}
-	for i, tx := range txs {
-		msg, err := TransactionToMessage(tx, signer, header.BaseFee)
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
-		}
-		statedb.SetTxContext(tx.Hash(), i)
 
-		var preResult *vm.Result
-		if cfg.IsSeer {
-			if cfg.IsPreExec {
-				statedb = statedbBase.Copy()
-				evm.StateDB = statedb
-				cfg.PreExecutionTable.InitialResult(tx.Hash())
-			} else {
+		dependeesList := make([][]int, txNum)
+		for i := range txNum {
+			dependeesList[i] = conflicts.DirectAncestors(i)
+		}
+		triggers := make([]atomic.Int64, txNum)
+		var run func(i int) error
+		run = func(i int) error {
+			defer close(completes2[i])
+			tx := block.Transactions()[i]
+			<-completes1[i]
+			statedbCopy := statedbs[i]
+			statedbCopy.SetTxContext(tx.Hash(), i)
+			for _, j := range dependeesList[i] {
+				statedbCopy.MergeState(statedbs[j])
+			}
+
+			var preResult *vm.Result
+			if cfg.IsSeer {
 				preResult, _ = cfg.PreExecutionTable.GetResult(tx.Hash())
+				statedbCopy.SetNonce(msgs[i].From, msgs[i].Nonce, tracing.NonceChangeUnspecified)
+				mgval := new(big.Int).SetUint64(msgs[i].GasLimit)
+				mgval = mgval.Mul(mgval, msgs[i].GasPrice)
+				balanceCheck := mgval
+				if msgs[i].GasFeeCap != nil {
+					balanceCheck = new(big.Int).SetUint64(msgs[i].GasLimit)
+					balanceCheck = balanceCheck.Mul(balanceCheck, msgs[i].GasFeeCap)
+					balanceCheck.Add(balanceCheck, msgs[i].Value)
+				}
+				statedbCopy.AddBalance(msgs[i].From, uint256.MustFromBig(balanceCheck), tracing.BalanceChangeUnspecified)
 			}
-			statedb.SetNonce(msg.From, msg.Nonce, tracing.NonceChangeUnspecified)
-			mgval := new(big.Int).SetUint64(msg.GasLimit)
-			mgval = mgval.Mul(mgval, msg.GasPrice)
-			balanceCheck := mgval
-			if msg.GasFeeCap != nil {
-				balanceCheck = new(big.Int).SetUint64(msg.GasLimit)
-				balanceCheck = balanceCheck.Mul(balanceCheck, msg.GasFeeCap)
-				balanceCheck.Add(balanceCheck, msg.Value)
+
+			gp := new(GasPool).AddGas(block.GasLimit())
+			evm := vm.NewEVM(context, statedbCopy, config, cfg)
+			result, err := ApplyMessageHelper(evm, msgs[i], gp, statedbCopy, tx, preResult)
+			if err != nil {
+				return err
 			}
-			statedb.AddBalance(msg.From, uint256.MustFromBig(balanceCheck), tracing.BalanceChangeUnspecified)
+			receipt := MakeReceipt(evm, result, statedbCopy, blockNumber, blockHash, context.Time, tx, result.UsedGas, common.Hash{}.Bytes())
+			receipts[i] = receipt
+
+			for _, j := range conflicts.DirectDescendants(i) {
+				if count := triggers[j].Add(1); int(count) == conflicts.DirectAncestorNum(j) {
+					wg.Go(func() error {
+						return run(j)
+					})
+				}
+			}
+			return nil
 		}
 
-		receipt, err := ApplyTransactionWithEVM(msg, gp, statedb, blockNumber, blockHash, context.Time, tx, usedGas, evm, preResult)
-		if cfg.IsPreExec {
-			continue
+		for i := range txNum {
+			if len(dependeesList[i]) == 0 {
+				wg.Go(func() error {
+					return run(i)
+				})
+			}
 		}
-		if err != nil {
-			return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+
+		deleteEmptyObjects := config.IsEIP158(block.Number())
+		for i := range txNum {
+			<-completes2[i]
+			statedb.FinaliseForParallelExecution(deleteEmptyObjects, statedbs[i])
 		}
-		receipts = append(receipts, receipt)
-		allLogs = append(allLogs, receipt.Logs...)
+		if err := wg.Wait(); err != nil {
+			return nil, err
+		}
+		for _, receipt := range receipts {
+			allLogs = append(allLogs, receipt.Logs...)
+		}
+	} else {
+		var txs types.Transactions
+		if !cfg.IsPreExec {
+			txs = block.Transactions()
+		} else {
+			txs = make(types.Transactions, 0, block.Transactions().Len())
+			for i, tx := range block.Transactions() {
+				if !cfg.Privates.Test(uint(i)) {
+					txs = append(txs, tx)
+				}
+			}
+			slices.SortFunc(txs, func(a, b *types.Transaction) int {
+				return -a.EffectiveGasTipCmp(b, uint256.MustFromBig(block.BaseFee()))
+			})
+		}
+		for i, tx := range txs {
+			msg, err := TransactionToMessage(tx, signer, header.BaseFee)
+			if err != nil {
+				return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			statedb.SetTxContext(tx.Hash(), i)
+
+			var preResult *vm.Result
+			if cfg.IsSeer {
+				if cfg.IsPreExec {
+					statedb = statedbBase.Copy()
+					evm.StateDB = statedb
+					cfg.PreExecutionTable.InitialResult(tx.Hash())
+				} else {
+					preResult, _ = cfg.PreExecutionTable.GetResult(tx.Hash())
+				}
+				statedb.SetNonce(msg.From, msg.Nonce, tracing.NonceChangeUnspecified)
+				mgval := new(big.Int).SetUint64(msg.GasLimit)
+				mgval = mgval.Mul(mgval, msg.GasPrice)
+				balanceCheck := mgval
+				if msg.GasFeeCap != nil {
+					balanceCheck = new(big.Int).SetUint64(msg.GasLimit)
+					balanceCheck = balanceCheck.Mul(balanceCheck, msg.GasFeeCap)
+					balanceCheck.Add(balanceCheck, msg.Value)
+				}
+				statedb.AddBalance(msg.From, uint256.MustFromBig(balanceCheck), tracing.BalanceChangeUnspecified)
+			}
+
+			receipt, err := ApplyTransactionWithEVM(msg, gp, statedb, blockNumber, blockHash, context.Time, tx, usedGas, evm, preResult)
+			if cfg.IsPreExec {
+				continue
+			}
+			if err != nil {
+				return nil, fmt.Errorf("could not apply tx %d [%v]: %w", i, tx.Hash().Hex(), err)
+			}
+			receipts = append(receipts, receipt)
+			allLogs = append(allLogs, receipt.Logs...)
+		}
 	}
 	if cfg.IsSeer {
 		if cfg.IsPreExec {

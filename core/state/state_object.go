@@ -52,6 +52,9 @@ type stateObject struct {
 	origin   *types.StateAccount // Account original data without any change applied, nil means it was not existent
 	data     types.StateAccount  // Account data with all mutations applied in the scope of block
 
+	nonceDelta   uint64
+	balanceDelta *uint256.Int
+
 	// Write caches.
 	trie Trie   // storage trie, which becomes non-nil on first access
 	code []byte // contract bytecode, which gets set when code is loaded
@@ -88,7 +91,7 @@ type stateObject struct {
 
 // empty returns whether the account is considered empty.
 func (s *stateObject) empty() bool {
-	return s.data.Nonce == 0 && s.data.Balance.IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
+	return s.Nonce() == 0 && s.Balance().IsZero() && bytes.Equal(s.data.CodeHash, types.EmptyCodeHash.Bytes())
 }
 
 // newObject creates a state object.
@@ -103,6 +106,26 @@ func newObject(db *StateDB, address common.Address, acct *types.StateAccount) *s
 		addrHash:           crypto.Keccak256Hash(address[:]),
 		origin:             origin,
 		data:               *acct,
+		balanceDelta:       new(uint256.Int),
+		originStorage:      make(Storage),
+		dirtyStorage:       make(Storage),
+		pendingStorage:     make(Storage),
+		uncommittedStorage: make(Storage),
+	}
+}
+
+func newObjectWithAddrHash(db *StateDB, address common.Address, acct *types.StateAccount, addrHash common.Hash) *stateObject {
+	origin := acct
+	if acct == nil {
+		acct = types.NewEmptyStateAccount()
+	}
+	return &stateObject{
+		db:                 db,
+		address:            address,
+		addrHash:           addrHash,
+		origin:             origin,
+		data:               *acct,
+		balanceDelta:       new(uint256.Int),
 		originStorage:      make(Storage),
 		dirtyStorage:       make(Storage),
 		pendingStorage:     make(Storage),
@@ -469,14 +492,14 @@ func (s *stateObject) AddBalance(amount *uint256.Int) uint256.Int {
 
 // SetBalance sets the balance for the object, and returns the previous balance.
 func (s *stateObject) SetBalance(amount *uint256.Int) uint256.Int {
-	prev := *s.data.Balance
-	s.db.journal.balanceChange(s.address, s.data.Balance)
+	prev := *s.Balance()
+	s.db.journal.balanceChange(s.address, s.Balance())
 	s.setBalance(amount)
 	return prev
 }
 
 func (s *stateObject) setBalance(amount *uint256.Int) {
-	s.data.Balance = amount
+	s.data.Balance = new(uint256.Int).Sub(amount, s.balanceDelta)
 }
 
 func (s *stateObject) deepCopy(db *StateDB) *stateObject {
@@ -486,6 +509,8 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 		addrHash:           s.addrHash,
 		origin:             s.origin,
 		data:               s.data,
+		nonceDelta:         s.nonceDelta,
+		balanceDelta:       s.balanceDelta.Clone(),
 		code:               s.code,
 		originStorage:      s.originStorage.Copy(),
 		pendingStorage:     s.pendingStorage.Copy(),
@@ -509,6 +534,30 @@ func (s *stateObject) deepCopy(db *StateDB) *stateObject {
 		obj.trie = mustCopyTrie(s.trie)
 	case nil:
 		// do nothing
+	}
+	return obj
+}
+
+func (s *stateObject) deepCopyForMerge() *stateObject {
+	obj := &stateObject{
+		origin:         s.origin,
+		data:           s.data,
+		nonceDelta:     s.nonceDelta,
+		balanceDelta:   s.balanceDelta.Clone(),
+		code:           s.code,
+		originStorage:  make(Storage, len(s.dirtyStorage)),
+		pendingStorage: make(Storage, len(s.dirtyStorage)),
+		dirtyStorage:   s.dirtyStorage.Copy(),
+		dirtyCode:      s.dirtyCode,
+		selfDestructed: s.selfDestructed,
+	}
+	for key := range s.dirtyStorage {
+		if value, ok := s.originStorage[key]; ok {
+			obj.originStorage[key] = value
+		}
+		if value, ok := s.pendingStorage[key]; ok {
+			obj.pendingStorage[key] = value
+		}
 	}
 	return obj
 }
@@ -575,12 +624,12 @@ func (s *stateObject) setCode(codeHash common.Hash, code []byte) {
 }
 
 func (s *stateObject) SetNonce(nonce uint64) {
-	s.db.journal.nonceChange(s.address, s.data.Nonce)
+	s.db.journal.nonceChange(s.address, s.Nonce())
 	s.setNonce(nonce)
 }
 
 func (s *stateObject) setNonce(nonce uint64) {
-	s.data.Nonce = nonce
+	s.data.Nonce = nonce - s.nonceDelta
 }
 
 func (s *stateObject) CodeHash() []byte {
@@ -588,11 +637,11 @@ func (s *stateObject) CodeHash() []byte {
 }
 
 func (s *stateObject) Balance() *uint256.Int {
-	return s.data.Balance
+	return new(uint256.Int).Add(s.data.Balance, s.balanceDelta)
 }
 
 func (s *stateObject) Nonce() uint64 {
-	return s.data.Nonce
+	return s.data.Nonce + s.nonceDelta
 }
 
 func (s *stateObject) Root() common.Hash {
