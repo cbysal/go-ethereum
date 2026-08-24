@@ -34,7 +34,8 @@ func makeGasSStoreFunc(clearingRefund uint64) gasFunc {
 		}
 		// Gas sentry honoured, do the actual gas calculation based on the stored value
 		var (
-			y, x              = stack.Back(1), stack.peek()
+			y                 = stack.Back(1)
+			x, _              = stack.peek()
 			slot              = common.Hash(x.Bytes32())
 			current, original = evm.StateDB.GetStateAndCommittedState(contract.Address(), slot)
 			cost              = uint64(0)
@@ -65,7 +66,9 @@ func makeGasSStoreFunc(clearingRefund uint64) gasFunc {
 		}
 		if original != (common.Hash{}) {
 			if current == (common.Hash{}) { // recreate slot (2.2.1.1)
-				evm.StateDB.SubRefund(clearingRefund)
+				if evm.StateDB.GetRefund() >= clearingRefund {
+					evm.StateDB.SubRefund(clearingRefund)
+				}
 			} else if value == (common.Hash{}) { // delete slot (2.2.1.2)
 				evm.StateDB.AddRefund(clearingRefund)
 			}
@@ -96,7 +99,7 @@ func makeGasSStoreFunc(clearingRefund uint64) gasFunc {
 // charge 2100 gas and add the pair to accessed_storage_keys.
 // If the pair is already in accessed_storage_keys, charge 100 gas.
 func gasSLoadEIP2929(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	loc := stack.peek()
+	loc, _ := stack.peek()
 	slot := common.Hash(loc.Bytes32())
 	// Check slot presence in the access list
 	if _, slotPresent := evm.StateDB.SlotInAccessList(contract.Address(), slot); !slotPresent {
@@ -119,7 +122,8 @@ func gasExtCodeCopyEIP2929(evm *EVM, contract *Contract, stack *Stack, mem *Memo
 	if err != nil {
 		return 0, err
 	}
-	addr := common.Address(stack.peek().Bytes20())
+	peekVal, _ := stack.peek()
+	addr := common.Address(peekVal.Bytes20())
 	// Check slot presence in the access list
 	if !evm.StateDB.AddressInAccessList(addr) {
 		evm.StateDB.AddAddressToAccessList(addr)
@@ -141,7 +145,8 @@ func gasExtCodeCopyEIP2929(evm *EVM, contract *Contract, stack *Stack, mem *Memo
 // - extcodesize,
 // - (ext) balance
 func gasEip2929AccountCheck(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	addr := common.Address(stack.peek().Bytes20())
+	peekVal, _ := stack.peek()
+	addr := common.Address(peekVal.Bytes20())
 	// Check slot presence in the access list
 	if !evm.StateDB.AddressInAccessList(addr) {
 		// If the caller cannot afford the cost, this change will be rolled back
@@ -223,8 +228,9 @@ var (
 func makeSelfdestructGasFn(refundsEnabled bool) gasFunc {
 	gasFunc := func(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
 		var (
-			gas     uint64
-			address = common.Address(stack.peek().Bytes20())
+			gas        uint64
+			peekVal, _ = stack.peek()
+			address    = common.Address(peekVal.Bytes20())
 		)
 		if !evm.StateDB.AddressInAccessList(address) {
 			// If the caller cannot afford the cost, this change will be rolled back

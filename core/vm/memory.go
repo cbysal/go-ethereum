@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"slices"
 	"sync"
 
 	"github.com/holiman/uint256"
@@ -124,4 +125,11 @@ func (m *Memory) Copy(dst, src, len uint64) {
 		return
 	}
 	copy(m.store[dst:], m.store[src:src+len])
+}
+
+func (m *Memory) Clone() *Memory {
+	return &Memory{
+		store:       slices.Clone(m.store),
+		lastGasCost: m.lastGasCost,
+	}
 }

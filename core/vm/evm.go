@@ -77,6 +77,9 @@ type TxContext struct {
 	BlobHashes   []common.Hash       // Provides information for BLOBHASH
 	BlobFeeCap   *big.Int            // Is used to zero the blobbasefee if NoBaseFee is set
 	AccessEvents *state.AccessEvents // Capture all state accesses for this tx
+
+	GasTip *big.Int
+	ID     common.Hash
 }
 
 // EVM is the Ethereum Virtual Machine base object and provides
@@ -130,6 +133,9 @@ type EVM struct {
 
 	readOnly   bool   // Whether to throw on stateful modifications
 	returnData []byte // Last CALL's return data for subsequent reuse
+
+	Keccak256Hashes map[common.Hash][]common.Hash
+	callMap         map[int]*Snapshot // records the call stack mapping from the call depth to the snapshot
 }
 
 // NewEVM constructs an EVM instance with the supplied block context, state
@@ -280,7 +286,13 @@ func (evm *EVM) Call(caller common.Address, addr common.Address, input []byte, g
 		}
 		evm.StateDB.CreateAccount(addr)
 	}
-	evm.Context.Transfer(evm.StateDB, caller, addr, value)
+	if evm.Config.IsPreExec {
+		res, _ := evm.Config.PreExecutionTable.GetResult(evm.TxContext.ID)
+		res.CacheReadSet()
+		res.CacheWriteSet()
+	} else {
+		evm.Context.Transfer(evm.StateDB, caller, addr, value)
+	}
 
 	if isPrecompile {
 		ret, gas, err = RunPrecompiledContract(p, input, gas, evm.Config.Tracer)
@@ -340,6 +352,11 @@ func (evm *EVM) CallCode(caller common.Address, addr common.Address, input []byt
 	// Note although it's noop to transfer X ether to caller itself. But
 	// if caller doesn't have enough balance, it would be an error to allow
 	// over-charging itself. So the check here is necessary.
+	if evm.Config.IsPreExec {
+		res, _ := evm.Config.PreExecutionTable.GetResult(evm.TxContext.ID)
+		res.CacheReadSet()
+		res.CacheWriteSet()
+	}
 	if !evm.Context.CanTransfer(evm.StateDB, caller, value) {
 		return nil, gas, ErrInsufficientBalance
 	}
@@ -566,6 +583,11 @@ func (evm *EVM) create(caller common.Address, code []byte, gas uint64, value *ui
 		if err != ErrExecutionReverted {
 			contract.UseGas(contract.Gas, evm.Config.Tracer, tracing.GasChangeCallFailedExecution)
 		}
+	}
+	if evm.Config.IsPreExec {
+		res, _ := evm.Config.PreExecutionTable.GetResult(evm.TxContext.ID)
+		res.CacheReadSet()
+		res.CacheWriteSet()
 	}
 	return ret, address, contract.Gas, err
 }

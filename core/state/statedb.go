@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"maps"
+	"math/big"
 	"slices"
 	"sync"
 	"sync/atomic"
@@ -77,6 +78,7 @@ func (m *mutation) isDelete() bool {
 // must be created with new root and updated database for accessing post-
 // commit states.
 type StateDB struct {
+	slim       *SlimDatabase
 	db         Database
 	prefetcher *triePrefetcher
 	reader     Reader
@@ -156,6 +158,27 @@ type StateDB struct {
 	StorageLoaded  int          // Number of storage slots retrieved from the database during the state transition
 	StorageUpdated atomic.Int64 // Number of storage slots updated during the state transition
 	StorageDeleted atomic.Int64 // Number of storage slots deleted during the state transition
+}
+
+func NewSlim(db *SlimDatabase, height uint64) (*StateDB, error) {
+	db.SetHeight(height)
+	reader, err := db.Reader(common.BigToHash(big.NewInt(int64(height))))
+	if err != nil {
+		return nil, err
+	}
+	sdb := &StateDB{
+		slim:                 db,
+		reader:               reader,
+		stateObjects:         make(map[common.Address]*stateObject),
+		stateObjectsDestruct: make(map[common.Address]*stateObject),
+		mutations:            make(map[common.Address]*mutation),
+		logs:                 make(map[common.Hash][]*types.Log),
+		preimages:            make(map[common.Hash][]byte),
+		journal:              newJournal(),
+		accessList:           newAccessList(),
+		transientStorage:     newTransientStorage(),
+	}
+	return sdb, nil
 }
 
 // New creates a new state from a given trie.
@@ -669,6 +692,7 @@ func (s *StateDB) CreateContract(addr common.Address) {
 func (s *StateDB) Copy() *StateDB {
 	// Copy all the basic fields, initialize the memory ones
 	state := &StateDB{
+		slim:                 s.slim,
 		db:                   s.db,
 		reader:               s.reader,
 		originalRoot:         s.originalRoot,
@@ -790,6 +814,9 @@ func (s *StateDB) Finalise(deleteEmptyObjects bool) {
 func (s *StateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
 	// Finalise all the dirty storage states and write them into the tries
 	s.Finalise(deleteEmptyObjects)
+	if s.slim != nil {
+		return common.Hash{}
+	}
 
 	// Initialize the trie if it's not constructed yet. If the prefetch
 	// is enabled, the trie constructed below will be replaced by the
@@ -1371,6 +1398,33 @@ func (s *StateDB) commitAndFlush(block uint64, deleteEmptyObjects bool, noStorag
 // no empty accounts left that could be deleted by EIP-158, storage wiping
 // should not occur.
 func (s *StateDB) Commit(block uint64, deleteEmptyObjects bool, noStorageWiping bool) (common.Hash, error) {
+	if s.slim != nil {
+		s.Finalise(deleteEmptyObjects)
+		for addr := range s.stateObjectsDestruct {
+			if err := s.slim.DeleteAccount(addr); err != nil {
+				return common.Hash{}, err
+			}
+		}
+		for addr, object := range s.stateObjects {
+			if s.mutations[addr] == nil || s.mutations[addr].isDelete() {
+				continue
+			}
+			for key, value := range object.pendingStorage {
+				if err := s.slim.WriteStorage(addr, key, value); err != nil {
+					return common.Hash{}, err
+				}
+			}
+			if object.dirtyCode {
+				if err := s.slim.WriteCode(common.BytesToHash(object.data.CodeHash), object.code); err != nil {
+					return common.Hash{}, err
+				}
+			}
+			if err := s.slim.WriteAccount(addr, &object.data); err != nil {
+				return common.Hash{}, err
+			}
+		}
+		return common.Hash{}, nil
+	}
 	ret, err := s.commitAndFlush(block, deleteEmptyObjects, noStorageWiping)
 	if err != nil {
 		return common.Hash{}, err
@@ -1495,4 +1549,8 @@ func (s *StateDB) Witness() *stateless.Witness {
 
 func (s *StateDB) AccessEvents() *AccessEvents {
 	return s.accessEvents
+}
+
+func (s *StateDB) IsVerkle() bool {
+	return false
 }

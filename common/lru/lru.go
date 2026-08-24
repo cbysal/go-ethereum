@@ -93,3 +93,47 @@ func (c *Cache[K, V]) Keys() []K {
 
 	return c.cache.Keys()
 }
+
+type GroupCache[K1, K2 comparable, V any] struct {
+	cache GroupLRU[K1, K2, V]
+	mu    sync.Mutex
+}
+
+func NewGroupCache[K1, K2 comparable, V any](capacity int) *GroupCache[K1, K2, V] {
+	return &GroupCache[K1, K2, V]{cache: NewGroupLRU[K1, K2, V](capacity)}
+}
+
+func (c *GroupCache[K1, K2, V]) Add(key1 K1, key2 K2, value V) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cache.Add(key1, key2, value)
+}
+
+func (c *GroupCache[K1, K2, V]) Get(key1 K1, key2 K2) (value V, ok bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	return c.cache.Get(key1, key2)
+}
+
+func (c *GroupCache[K1, K2, V]) Purge() {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cache.Purge()
+}
+
+func (c *GroupCache[K1, K2, V]) Remove(key1 K1, key2 K2) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cache.Remove(key1, key2)
+}
+
+func (c *GroupCache[K1, K2, V]) RemoveGroup(key1 K1) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	c.cache.RemoveGroup(key1)
+}

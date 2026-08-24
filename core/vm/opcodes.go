@@ -18,6 +18,10 @@ package vm
 
 import (
 	"fmt"
+	"strings"
+
+	"github.com/ethereum/go-ethereum/common"
+	"github.com/holiman/uint256"
 )
 
 // OpCode is an EVM opcode
@@ -636,4 +640,153 @@ var stringToOp = map[string]OpCode{
 // StringToOp finds the opcode whose name is stored in `str`.
 func StringToOp(str string) OpCode {
 	return stringToOp[str]
+}
+
+// Compute conducts computation according to the input opcode
+func Compute(x, y *uint256.Int, op OpCode) error {
+	switch op {
+	case ADD:
+		y.Add(x, y)
+	case MUL:
+		y.Mul(x, y)
+	case SUB:
+		y.Sub(x, y)
+	case DIV:
+		y.Div(x, y)
+	case SDIV:
+		y.SDiv(x, y)
+	case MOD:
+		y.Mod(x, y)
+	case SMOD:
+		y.SMod(x, y)
+	case EXP:
+		y.Exp(x, y)
+	case NOT:
+		y.Not(y)
+	case AND:
+		y.And(x, y)
+	case OR:
+		y.Or(x, y)
+	case XOR:
+		y.Xor(x, y)
+	case BYTE:
+		y.Byte(x)
+	case SHL:
+		if x.LtUint64(256) {
+			y.Lsh(y, uint(x.Uint64()))
+		} else {
+			y.Clear()
+		}
+	case SHR:
+		if x.LtUint64(256) {
+			y.Rsh(y, uint(x.Uint64()))
+		} else {
+			y.Clear()
+		}
+	case SAR:
+		if x.GtUint64(256) {
+			if y.Sign() >= 0 {
+				y.Clear()
+			} else {
+				y.SetAllOne()
+			}
+		} else {
+			n := uint(x.Uint64())
+			y.SRsh(y, n)
+		}
+	case EQ:
+		if x.Eq(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
+	case LT:
+		if x.Lt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
+	case GT:
+		if x.Gt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
+	case SLT:
+		if x.Slt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
+	case SGT:
+		if x.Sgt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
+	default:
+		panic(fmt.Sprintf("non-existent operation: %v", op))
+	}
+	return nil
+}
+
+// GetEnvValue fetches the value relevant to the blockchain environment
+func GetEnvValue(op string, evm *EVM, num uint256.Int, cAddr common.Address) uint256.Int {
+	opcode := StringToOp(op)
+	v := &uint256.Int{}
+	switch opcode {
+	case STOP:
+	case GASPRICE:
+		v.SetFromBig(evm.GasPrice)
+	case BLOCKHASH:
+		num64, overflow := num.Uint64WithOverflow()
+		if overflow {
+			v.Clear()
+		} else {
+			var upper, lower uint64
+			upper = evm.Context.BlockNumber.Uint64()
+			if upper < 257 {
+				lower = 0
+			} else {
+				lower = upper - 256
+			}
+			if num64 >= lower && num64 < upper {
+				v.SetBytes(evm.Context.GetHash(num64).Bytes())
+			} else {
+				v.Clear()
+			}
+		}
+	case COINBASE:
+		v.SetBytes(evm.Context.Coinbase.Bytes())
+	case TIMESTAMP:
+		v.SetUint64(evm.Context.Time)
+	case NUMBER:
+		v, _ = uint256.FromBig(evm.Context.BlockNumber)
+	case DIFFICULTY:
+		if strings.Compare(op, "RANDOM") == 0 {
+			v.SetBytes(evm.Context.Random.Bytes())
+		} else {
+			v, _ = uint256.FromBig(evm.Context.Difficulty)
+		}
+	case GASLIMIT:
+		v.SetUint64(evm.Context.GasLimit)
+	case BASEFEE:
+		v, _ = uint256.FromBig(evm.Context.BaseFee)
+	case BALANCE:
+		v.Set(evm.StateDB.GetBalance(cAddr))
+	case SELFBALANCE:
+		v.Set(evm.StateDB.GetBalance(cAddr))
+	case BLOBHASH:
+		if num.LtUint64(uint64(len(evm.TxContext.BlobHashes))) {
+			blobHash := evm.TxContext.BlobHashes[num.Uint64()]
+			v.SetBytes32(blobHash[:])
+		} else {
+			v.Clear()
+		}
+	case BLOBBASEFEE:
+		v.SetFromBig(evm.Context.BlobBaseFee)
+	default:
+		panic(fmt.Sprintf("non-existent operation: %v", opcode))
+	}
+	return *v
 }

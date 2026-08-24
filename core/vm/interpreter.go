@@ -19,6 +19,7 @@ package vm
 import (
 	"fmt"
 
+	"github.com/bits-and-blooms/bitset"
 	"github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/math"
 	"github.com/ethereum/go-ethereum/core/tracing"
@@ -34,14 +35,23 @@ type Config struct {
 
 	StatelessSelfValidation bool // Generate execution witnesses and self-check against them (testing purpose)
 	EnableWitnessStats      bool // Whether trie access statistics collection is enabled
+
+	IsSeer            bool
+	IsPreExec         bool
+	MVCache           *MVCache
+	VarTable          *VarTable
+	PreExecutionTable *PreExecutionTable
+	Privates          *bitset.BitSet
 }
 
 // ScopeContext contains the things that are per-call, such as stack and memory,
 // but not transients like pc and gas
 type ScopeContext struct {
-	Memory   *Memory
-	Stack    *Stack
-	Contract *Contract
+	Memory    *Memory
+	Stack     *Stack
+	Contract  *Contract
+	TmpState  *TmpState
+	Signature string
 }
 
 // MemoryData returns the underlying memory slice. Callers must not modify the contents
@@ -138,10 +148,27 @@ func (evm *EVM) Run(contract *Contract, input []byte, readOnly bool) (ret []byte
 		debug     = evm.Config.Tracer != nil
 		isEIP4762 = evm.chainRules.IsEIP4762
 	)
+	if evm.Config.IsPreExec {
+		callContext.TmpState = NewTmpState()
+	}
+	var useCallMap bool
+	if evm.callMap != nil {
+		if snapshot, ok := evm.callMap[evm.depth]; ok {
+			mem = snapshot.GetMemory()
+			pc = snapshot.GetPC()
+			stack = snapshot.GetStack()
+			callContext.Memory = mem
+			callContext.Stack = stack
+			useCallMap = true
+		}
+	}
 	// Don't move this deferred function, it's placed before the OnOpcode-deferred method,
 	// so that it gets executed _after_: the OnOpcode needs the stacks before
 	// they are returned to the pools
 	defer func() {
+		if useCallMap {
+			return
+		}
 		returnStack(stack)
 		mem.Free()
 	}()
@@ -262,3 +289,5 @@ func (evm *EVM) Run(contract *Contract, input []byte, readOnly bool) (ret []byte
 
 	return res, err
 }
+
+func (evm *EVM) SetCallMap(callMap map[int]*Snapshot) { evm.callMap = callMap }

@@ -25,20 +25,24 @@ import (
 )
 
 func gasSStore4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	return evm.AccessEvents.SlotGas(contract.Address(), stack.peek().Bytes32(), true, contract.Gas, true), nil
+	peekVal, _ := stack.peek()
+	return evm.AccessEvents.SlotGas(contract.Address(), peekVal.Bytes32(), true, contract.Gas, true), nil
 }
 
 func gasSLoad4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	return evm.AccessEvents.SlotGas(contract.Address(), stack.peek().Bytes32(), false, contract.Gas, true), nil
+	peekVal, _ := stack.peek()
+	return evm.AccessEvents.SlotGas(contract.Address(), peekVal.Bytes32(), false, contract.Gas, true), nil
 }
 
 func gasBalance4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	address := stack.peek().Bytes20()
+	peekVal, _ := stack.peek()
+	address := peekVal.Bytes20()
 	return evm.AccessEvents.BasicDataGas(address, false, contract.Gas, true), nil
 }
 
 func gasExtCodeSize4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	address := stack.peek().Bytes20()
+	peekVal, _ := stack.peek()
+	address := peekVal.Bytes20()
 	if _, isPrecompile := evm.precompile(address); isPrecompile {
 		return 0, nil
 	}
@@ -46,7 +50,8 @@ func gasExtCodeSize4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory,
 }
 
 func gasExtCodeHash4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	address := stack.peek().Bytes20()
+	peekVal, _ := stack.peek()
+	address := peekVal.Bytes20()
 	if _, isPrecompile := evm.precompile(address); isPrecompile {
 		return 0, nil
 	}
@@ -108,7 +113,8 @@ var (
 )
 
 func gasSelfdestructEIP4762(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySize uint64) (uint64, error) {
-	beneficiaryAddr := common.Address(stack.peek().Bytes20())
+	peekVal, _ := stack.peek()
+	beneficiaryAddr := common.Address(peekVal.Bytes20())
 	if _, isPrecompile := evm.precompile(beneficiaryAddr); isPrecompile {
 		return 0, nil
 	}
@@ -187,7 +193,8 @@ func gasExtCodeCopyEIP4762(evm *EVM, contract *Contract, stack *Stack, mem *Memo
 	if err != nil {
 		return 0, err
 	}
-	addr := common.Address(stack.peek().Bytes20())
+	peekVal, _ := stack.peek()
+	addr := common.Address(peekVal.Bytes20())
 	_, isPrecompile := evm.precompile(addr)
 	if isPrecompile || addr == params.HistoryStorageAddress {
 		var overflow bool

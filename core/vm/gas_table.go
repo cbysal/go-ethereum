@@ -150,7 +150,9 @@ func gasSStore(evm *EVM, contract *Contract, stack *Stack, mem *Memory, memorySi
 	}
 	if original != (common.Hash{}) {
 		if current == (common.Hash{}) { // recreate slot (2.2.1.1)
-			evm.StateDB.SubRefund(params.NetSstoreClearRefund)
+			if evm.StateDB.GetRefund() >= params.NetSstoreClearRefund {
+				evm.StateDB.SubRefund(params.NetSstoreClearRefund)
+			}
 		} else if value == (common.Hash{}) { // delete slot (2.2.1.2)
 			evm.StateDB.AddRefund(params.NetSstoreClearRefund)
 		}
@@ -206,7 +208,9 @@ func gasSStoreEIP2200(evm *EVM, contract *Contract, stack *Stack, mem *Memory, m
 	}
 	if original != (common.Hash{}) {
 		if current == (common.Hash{}) { // recreate slot (2.2.1.1)
-			evm.StateDB.SubRefund(params.SstoreClearsScheduleRefundEIP2200)
+			if evm.StateDB.GetRefund() >= params.SstoreClearsScheduleRefundEIP2200 {
+				evm.StateDB.SubRefund(params.SstoreClearsScheduleRefundEIP2200)
+			}
 		} else if value == (common.Hash{}) { // delete slot (2.2.1.2)
 			evm.StateDB.AddRefund(params.SstoreClearsScheduleRefundEIP2200)
 		}

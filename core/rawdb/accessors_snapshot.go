@@ -85,6 +85,39 @@ func WriteAccountSnapshot(db ethdb.KeyValueWriter, hash common.Hash, entry []byt
 	}
 }
 
+func ReadAccount(db ethdb.ReversibleKeyValueStore, addr common.Address, height uint64) []byte {
+	iter := db.NewReverseIterator(append(DeletePrefix, addr[:]...), binary.BigEndian.AppendUint64(nil, height+1))
+	var deletedHeight uint64
+	if iter.Next() {
+		deletedHeight = binary.BigEndian.Uint64(iter.Key()[len(DeletePrefix)+common.AddressLength:])
+	}
+	iter.Release()
+
+	iter = db.NewReverseIterator(append(AccountPrefix, addr[:]...), binary.BigEndian.AppendUint64(nil, height+1))
+	var accountData []byte
+	if iter.Next() {
+		foundHeight := binary.BigEndian.Uint64(iter.Key()[len(AccountPrefix)+common.AddressLength:])
+		if foundHeight >= deletedHeight {
+			accountData = iter.Value()
+		}
+	}
+	iter.Release()
+
+	return accountData
+}
+
+func WriteAccount(db ethdb.KeyValueWriter, addr common.Address, height uint64, entry []byte) {
+	if err := db.Put(accountKey(addr, height), entry); err != nil {
+		log.Crit("Failed to store account", "err", err)
+	}
+}
+
+func DeleteAccount(db ethdb.KeyValueWriter, addr common.Address, height uint64) {
+	if err := db.Put(deleteKey(addr, height), []byte{}); err != nil {
+		log.Crit("Failed to delete account", "err", err)
+	}
+}
+
 // DeleteAccountSnapshot removes the snapshot entry of an account trie leaf.
 func DeleteAccountSnapshot(db ethdb.KeyValueWriter, hash common.Hash) {
 	if err := db.Delete(accountSnapshotKey(hash)); err != nil {
@@ -109,6 +142,33 @@ func WriteStorageSnapshot(db ethdb.KeyValueWriter, accountHash, storageHash comm
 func DeleteStorageSnapshot(db ethdb.KeyValueWriter, accountHash, storageHash common.Hash) {
 	if err := db.Delete(storageSnapshotKey(accountHash, storageHash)); err != nil {
 		log.Crit("Failed to delete storage snapshot", "err", err)
+	}
+}
+
+func ReadStorage(db ethdb.ReversibleKeyValueStore, addr common.Address, hash common.Hash, height uint64) []byte {
+	iter := db.NewReverseIterator(append(DeletePrefix, addr[:]...), binary.BigEndian.AppendUint64(nil, height+1))
+	var deletedHeight uint64
+	if iter.Next() {
+		deletedHeight = binary.BigEndian.Uint64(iter.Key()[len(DeletePrefix)+common.AddressLength:])
+	}
+	iter.Release()
+
+	iter = db.NewReverseIterator(append(append(StoragePrefix, addr[:]...), hash[:]...), binary.BigEndian.AppendUint64(nil, height+1))
+	var storageData []byte
+	if iter.Next() {
+		foundHeight := binary.BigEndian.Uint64(iter.Key()[len(StoragePrefix)+common.AddressLength+common.HashLength:])
+		if foundHeight >= deletedHeight {
+			storageData = iter.Value()
+		}
+	}
+	iter.Release()
+
+	return storageData
+}
+
+func WriteStorage(db ethdb.KeyValueWriter, addr common.Address, hash common.Hash, height uint64, entry []byte) {
+	if err := db.Put(storageKey(addr, hash, height), entry); err != nil {
+		log.Crit("Failed to store storage", "err", err)
 	}
 }
 

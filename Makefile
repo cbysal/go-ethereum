@@ -2,11 +2,17 @@
 # with Go source code. If you know what GOPATH is then you probably
 # don't need to bother with make.
 
-.PHONY: geth evm all test lint fmt clean devtools help
+.PHONY: slim geth evm all test lint fmt clean devtools help
 
 GOBIN = ./build/bin
 GO ?= latest
 GORUN = go run
+
+#? slim: Build slim.
+slim:
+	$(GORUN) build/ci.go install ./cmd/slim
+	@echo "Done building."
+	@echo "Run \"$(GOBIN)/slim\" to launch slim."
 
 #? geth: Build geth.
 geth:

@@ -61,6 +61,22 @@ func NewContract(caller common.Address, address common.Address, value *uint256.I
 	}
 }
 
+func (c *Contract) Copy() *Contract {
+	return &Contract{
+		caller:       c.caller,
+		address:      c.address,
+		jumpDests:    c.jumpDests,
+		analysis:     c.analysis,
+		Code:         c.Code,
+		CodeHash:     c.CodeHash,
+		Input:        c.Input,
+		IsDeployment: c.IsDeployment,
+		IsSystemCall: c.IsSystemCall,
+		Gas:          c.Gas,
+		value:        c.value,
+	}
+}
+
 func (c *Contract) validJumpdest(dest *uint256.Int) bool {
 	udest, overflow := dest.Uint64WithOverflow()
 	// PC cannot go beyond len(code) and certainly can't be bigger than 63bits.

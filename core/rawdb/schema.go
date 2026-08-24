@@ -161,6 +161,10 @@ var (
 	// old log index
 	bloomBitsMetaPrefix = []byte("iB")
 
+	AccountPrefix = []byte("a")
+	DeletePrefix  = []byte("d")
+	StoragePrefix = []byte("s")
+
 	preimageCounter     = metrics.NewRegisteredCounter("db/preimage/total", nil)
 	preimageHitsCounter = metrics.NewRegisteredCounter("db/preimage/hits", nil)
 	preimageMissCounter = metrics.NewRegisteredCounter("db/preimage/miss", nil)
@@ -224,6 +228,22 @@ func accountSnapshotKey(hash common.Hash) []byte {
 	return append(SnapshotAccountPrefix, hash.Bytes()...)
 }
 
+func accountKey(addr common.Address, height uint64) []byte {
+	buf := make([]byte, len(AccountPrefix)+common.AddressLength+8)
+	n := copy(buf, AccountPrefix)
+	n += copy(buf[n:], addr.Bytes())
+	binary.BigEndian.PutUint64(buf[n:], height)
+	return buf
+}
+
+func deleteKey(addr common.Address, height uint64) []byte {
+	buf := make([]byte, len(DeletePrefix)+common.AddressLength+8)
+	n := copy(buf, DeletePrefix)
+	n += copy(buf[n:], addr.Bytes())
+	binary.BigEndian.PutUint64(buf[n:], height)
+	return buf
+}
+
 // storageSnapshotKey = SnapshotStoragePrefix + account hash + storage hash
 func storageSnapshotKey(accountHash, storageHash common.Hash) []byte {
 	buf := make([]byte, len(SnapshotStoragePrefix)+common.HashLength+common.HashLength)
@@ -236,6 +256,15 @@ func storageSnapshotKey(accountHash, storageHash common.Hash) []byte {
 // storageSnapshotsKey = SnapshotStoragePrefix + account hash + storage hash
 func storageSnapshotsKey(accountHash common.Hash) []byte {
 	return append(SnapshotStoragePrefix, accountHash.Bytes()...)
+}
+
+func storageKey(addr common.Address, hash common.Hash, height uint64) []byte {
+	buf := make([]byte, len(StoragePrefix)+common.AddressLength+common.HashLength+8)
+	n := copy(buf, StoragePrefix)
+	n += copy(buf[n:], addr.Bytes())
+	n += copy(buf[n:], hash.Bytes())
+	binary.BigEndian.PutUint64(buf[n:], height)
+	return buf
 }
 
 // skeletonHeaderKey = skeletonHeaderPrefix + num (uint64 big endian)

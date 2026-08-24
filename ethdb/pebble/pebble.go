@@ -723,6 +723,7 @@ type pebbleIterator struct {
 	iter     *pebble.Iterator
 	moved    bool
 	released bool
+	reverse  bool
 }
 
 // NewIterator creates a binary-alphabetical iterator over a subset
@@ -734,7 +735,16 @@ func (d *Database) NewIterator(prefix []byte, start []byte) ethdb.Iterator {
 		UpperBound: upperBound(prefix),
 	})
 	iter.First()
-	return &pebbleIterator{iter: iter, moved: true, released: false}
+	return &pebbleIterator{iter: iter, moved: true, released: false, reverse: false}
+}
+
+func (d *Database) NewReverseIterator(prefix []byte, end []byte) ethdb.Iterator {
+	iter, _ := d.db.NewIter(&pebble.IterOptions{
+		LowerBound: prefix,
+		UpperBound: append(prefix, end...),
+	})
+	iter.Last()
+	return &pebbleIterator{iter: iter, moved: true, released: false, reverse: true}
 }
 
 // Next moves the iterator to the next key/value pair. It returns whether the
@@ -743,6 +753,9 @@ func (iter *pebbleIterator) Next() bool {
 	if iter.moved {
 		iter.moved = false
 		return iter.iter.Valid()
+	}
+	if iter.reverse {
+		return iter.iter.Prev()
 	}
 	return iter.iter.Next()
 }

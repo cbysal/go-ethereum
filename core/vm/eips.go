@@ -92,6 +92,9 @@ func enable1884(jt *JumpTable) {
 func opSelfBalance(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	balance := evm.StateDB.GetBalance(scope.Contract.Address())
 	scope.Stack.push(balance)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *balance, uint256.Int{}, "SELFBALANCE", scope.Contract.Address())
+	}
 	return nil, nil
 }
 
@@ -200,7 +203,7 @@ func enable1153(jt *JumpTable) {
 
 // opTload implements TLOAD opcode
 func opTload(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	loc := scope.Stack.peek()
+	loc, _ := scope.Stack.peek()
 	hash := common.Hash(loc.Bytes32())
 	val := evm.StateDB.GetTransientState(scope.Contract.Address(), hash)
 	loc.SetBytes(val.Bytes())
@@ -212,8 +215,8 @@ func opTstore(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.readOnly {
 		return nil, ErrWriteProtection
 	}
-	loc := scope.Stack.pop()
-	val := scope.Stack.pop()
+	loc, _ := scope.Stack.pop()
+	val, _ := scope.Stack.pop()
 	evm.StateDB.SetTransientState(scope.Contract.Address(), loc.Bytes32(), val.Bytes32())
 	return nil, nil
 }
@@ -222,6 +225,9 @@ func opTstore(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opBaseFee(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	baseFee, _ := uint256.FromBig(evm.Context.BaseFee)
 	scope.Stack.push(baseFee)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *baseFee, uint256.Int{}, "BASEFEE", common.Address{})
+	}
 	return nil, nil
 }
 
@@ -265,9 +271,9 @@ func enable5656(jt *JumpTable) {
 // opMcopy implements the MCOPY opcode (https://eips.ethereum.org/EIPS/eip-5656)
 func opMcopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		dst    = scope.Stack.pop()
-		src    = scope.Stack.pop()
-		length = scope.Stack.pop()
+		dst, _    = scope.Stack.pop()
+		src, _    = scope.Stack.pop()
+		length, _ = scope.Stack.pop()
 	)
 	// These values are checked for overflow during memory expansion calculation
 	// (the memorySize function on the opcode).
@@ -277,12 +283,17 @@ func opMcopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 // opBlobHash implements the BLOBHASH opcode
 func opBlobHash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	index := scope.Stack.peek()
+	index, indexUnit := scope.Stack.peek()
+	originIndex := *index
 	if index.LtUint64(uint64(len(evm.TxContext.BlobHashes))) {
 		blobHash := evm.TxContext.BlobHashes[index.Uint64()]
 		index.SetBytes32(blobHash[:])
 	} else {
 		index.Clear()
+	}
+	if evm.Config.IsPreExec {
+		indexUnit.SetValue(*index)
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *index, originIndex, "BLOBHASH", common.Address{})
 	}
 	return nil, nil
 }
@@ -291,13 +302,19 @@ func opBlobHash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opBlobBaseFee(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	blobBaseFee, _ := uint256.FromBig(evm.Context.BlobBaseFee)
 	scope.Stack.push(blobBaseFee)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *blobBaseFee, uint256.Int{}, "BLOBBASEFEE", common.Address{})
+	}
 	return nil, nil
 }
 
 // opCLZ implements the CLZ opcode (count leading zero bits)
 func opCLZ(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x := scope.Stack.peek()
+	x, xUnit := scope.Stack.peek()
 	x.SetUint64(256 - uint64(x.BitLen()))
+	if evm.Config.IsPreExec {
+		xUnit.SetValue(*x)
+	}
 	return nil, nil
 }
 
@@ -344,11 +361,11 @@ func enable6780(jt *JumpTable) {
 
 func opExtCodeCopyEIP4762(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		stack      = scope.Stack
-		a          = stack.pop()
-		memOffset  = stack.pop()
-		codeOffset = stack.pop()
-		length     = stack.pop()
+		stack         = scope.Stack
+		a, _          = stack.pop()
+		memOffset, _  = stack.pop()
+		codeOffset, _ = stack.pop()
+		length, _     = stack.pop()
 	)
 	uint64CodeOffset, overflow := codeOffset.Uint64WithOverflow()
 	if overflow {
@@ -363,6 +380,11 @@ func opExtCodeCopyEIP4762(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, er
 		return nil, ErrOutOfGas
 	}
 	scope.Memory.Set(memOffset.Uint64(), length.Uint64(), paddedCodeCopy)
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
+	}
 
 	return nil, nil
 }

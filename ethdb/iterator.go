@@ -59,3 +59,7 @@ type Iteratee interface {
 	// no need for the caller to prepend the prefix to the start
 	NewIterator(prefix []byte, start []byte) Iterator
 }
+
+type ReverseIteratee interface {
+	NewReverseIterator(prefix []byte, end []byte) Iterator
+}

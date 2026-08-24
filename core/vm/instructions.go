@@ -17,6 +17,7 @@
 package vm
 
 import (
+	"errors"
 	"math"
 
 	"github.com/ethereum/go-ethereum/common"
@@ -27,158 +28,464 @@ import (
 )
 
 func opAdd(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Add(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, ADD, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opSub(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Sub(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, SUB, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opMul(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Mul(&x, y)
+	if evm.Config.IsPreExec {
+		normalUnit, ok := yUnit.(*NormalUnit)
+		isOffset := ok && normalUnit.GetFlag()
+		if isMask(x) && isOffset {
+			bits := 4 * (len(x.Hex()) - 2)
+			normalUnit.SetBits(bits)
+		}
+		merge(x, originVal, *y, MUL, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opDiv(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Div(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, DIV, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opSdiv(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.SDiv(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, SDIV, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opMod(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Mod(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, MOD, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opSmod(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.SMod(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, SMOD, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opExp(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	base, exponent := scope.Stack.pop(), scope.Stack.peek()
+	base, baseUnit := scope.Stack.pop()
+	exponent, exponentUnit := scope.Stack.peek()
+	originVal := *exponent
 	exponent.Exp(&base, exponent)
+	if evm.Config.IsPreExec {
+		merge(base, originVal, *exponent, EXP, baseUnit, exponentUnit, scope, true)
+		if offsetUnit, ok := exponentUnit.(*NormalUnit); ok {
+			offsetUnit.SetFlag()
+			offsetUnit.SetOffset(*exponent)
+		}
+	}
 	return nil, nil
 }
 
 func opSignExtend(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	back, num := scope.Stack.pop(), scope.Stack.peek()
+	back, _ := scope.Stack.pop()
+	num, numUnit := scope.Stack.peek()
 	num.ExtendSign(num, &back)
+	if evm.Config.IsPreExec {
+		if sUnit, ok := numUnit.(*StateUnit); ok {
+			ops := sUnit.GetTracer()
+			if len(ops) > 0 {
+				latestTr := ops[len(ops)-1]
+				if latestTr.GetOps() == DIV && !sUnit.GetSignExtend() {
+					offset := latestTr.GetVal()
+					bits := 8 * (int(back.Uint64()) + 1)
+					sUnit.SetOffset(offset)
+					sUnit.SetBits(bits)
+					sUnit.UpdateStorageValue(*num)
+					sUnit.ClearTracer()
+					fragment, _ := scope.TmpState.GetFragment(scope.Contract.Address(), sUnit.GetSlot())
+					fragment.GenerateVar(sUnit)
+				}
+			}
+			sUnit.SetSignExtend()
+		}
+		numUnit.SetValue(*num)
+	}
 	return nil, nil
 }
 
 func opNot(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x := scope.Stack.peek()
+	x, xUnit := scope.Stack.peek()
 	x.Not(x)
+	if evm.Config.IsPreExec {
+		xUnit.SetValue(*x)
+		if unit, ok := xUnit.(*StateUnit); ok {
+			unit.Record(NOT, uint256.Int{}, true, nil)
+		}
+	}
 	return nil, nil
 }
 
 func opLt(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
-	if x.Lt(y) {
-		y.SetOne()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	if !evm.Config.IsPreExec {
+		if x.Lt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
 	} else {
-		y.Clear()
+		xVal, yVal, res, err := branchRecord(*pc, 0, evm, scope, xUnit, yUnit, "LT")
+		if err != nil {
+			return nil, err
+		}
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		switch res {
+		case taken:
+			y.SetOne()
+			ret.UpdateDirection(1)
+		case notTaken:
+			y.Clear()
+			ret.UpdateDirection(0)
+		case uncertain:
+			if xVal.Lt(&yVal) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+			ret.UpdateDirection(int(y.Uint64()))
+		case skip:
+			if x.Lt(y) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+		}
+		merge(x, uint256.Int{}, *y, LT, xUnit, yUnit, scope, false)
 	}
 	return nil, nil
 }
 
 func opGt(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
-	if x.Gt(y) {
-		y.SetOne()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	if !evm.Config.IsPreExec {
+		if x.Gt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
 	} else {
-		y.Clear()
+		xVal, yVal, res, err := branchRecord(*pc, 0, evm, scope, xUnit, yUnit, "GT")
+		if err != nil {
+			return nil, err
+		}
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		switch res {
+		case taken:
+			y.SetOne()
+			ret.UpdateDirection(1)
+		case notTaken:
+			y.Clear()
+			ret.UpdateDirection(0)
+		case uncertain:
+			if xVal.Gt(&yVal) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+			ret.UpdateDirection(int(y.Uint64()))
+		case skip:
+			if x.Gt(y) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+		}
+		merge(x, uint256.Int{}, *y, GT, xUnit, yUnit, scope, false)
 	}
 	return nil, nil
 }
 
 func opSlt(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
-	if x.Slt(y) {
-		y.SetOne()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	if !evm.Config.IsPreExec {
+		if x.Slt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
 	} else {
-		y.Clear()
+		xVal, yVal, res, err := branchRecord(*pc, 0, evm, scope, xUnit, yUnit, "SLT")
+		if err != nil {
+			return nil, err
+		}
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		switch res {
+		case taken:
+			y.SetOne()
+			ret.UpdateDirection(1)
+		case notTaken:
+			y.Clear()
+			ret.UpdateDirection(0)
+		case uncertain:
+			if xVal.Slt(&yVal) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+			ret.UpdateDirection(int(y.Uint64()))
+		case skip:
+			if x.Slt(y) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+		}
+		merge(x, uint256.Int{}, *y, SLT, xUnit, yUnit, scope, false)
 	}
 	return nil, nil
 }
 
 func opSgt(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
-	if x.Sgt(y) {
-		y.SetOne()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	if !evm.Config.IsPreExec {
+		if x.Sgt(y) {
+			y.SetOne()
+		} else {
+			y.Clear()
+		}
 	} else {
-		y.Clear()
+		xVal, yVal, res, err := branchRecord(*pc, 0, evm, scope, xUnit, yUnit, "SGT")
+		if err != nil {
+			return nil, err
+		}
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		switch res {
+		case taken:
+			y.SetOne()
+			ret.UpdateDirection(1)
+		case notTaken:
+			y.Clear()
+			ret.UpdateDirection(0)
+		case uncertain:
+			if xVal.Sgt(&yVal) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+			ret.UpdateDirection(int(y.Uint64()))
+		case skip:
+			if x.Sgt(y) {
+				y.SetOne()
+			} else {
+				y.Clear()
+			}
+		}
+		merge(x, uint256.Int{}, *y, SGT, xUnit, yUnit, scope, false)
 	}
 	return nil, nil
 }
 
 func opEq(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	if x.Eq(y) {
 		y.SetOne()
 	} else {
 		y.Clear()
 	}
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, EQ, xUnit, yUnit, scope, false)
+	}
 	return nil, nil
 }
 
 func opIszero(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x := scope.Stack.peek()
+	x, xUnit := scope.Stack.peek()
 	if x.IsZero() {
 		x.SetOne()
 	} else {
 		x.Clear()
 	}
+	if evm.Config.IsPreExec {
+		xUnit.SetValue(*x)
+	}
 	return nil, nil
 }
 
 func opAnd(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.And(&x, y)
+	if evm.Config.IsPreExec {
+		normalUnit, ok := xUnit.(*NormalUnit)
+		unit, ok2 := yUnit.(*StateUnit)
+		if ok && ok2 && isMask(x) {
+			if len(x.Hex()) < 66 {
+				ops := unit.GetTracer()
+				if len(ops) > 0 {
+					latestTr := ops[len(ops)-1]
+					if latestTr.GetOps() == DIV {
+						offset := latestTr.val
+						bits := 4 * (len(x.Hex()) - 2)
+						unit.SetOffset(offset)
+						unit.SetBits(bits)
+						unit.UpdateStorageValue(*y)
+						unit.ClearTracer()
+						fragment, exist := scope.TmpState.GetFragment(scope.Contract.Address(), unit.GetSlot())
+						if !exist {
+							fragment = scope.TmpState.InsertUnit(scope.Contract.Address(), unit.GetSlot())
+						}
+						fragment.GenerateVar(unit)
+						unit.SetValue(*y)
+						return nil, nil
+					}
+				}
+			} else {
+				bits := normalUnit.GetBits()
+				offset := normalUnit.GetOffset()
+				if offset.Uint64() > 0 && bits < 256 {
+					unit.SetBits(bits)
+					unit.SetOffset(offset)
+					fragment, exist := scope.TmpState.GetFragment(scope.Contract.Address(), unit.GetSlot())
+					if !exist {
+						fragment = scope.TmpState.InsertUnit(scope.Contract.Address(), unit.GetSlot())
+					}
+					fragment.GenerateVar(unit)
+					unit.SetValue(*y)
+					return nil, nil
+				}
+			}
+		}
+		merge(x, originVal, *y, AND, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opOr(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Or(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, OR, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opXor(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y := scope.Stack.pop(), scope.Stack.peek()
+	x, xUnit := scope.Stack.pop()
+	y, yUnit := scope.Stack.peek()
+	originVal := *y
 	y.Xor(&x, y)
+	if evm.Config.IsPreExec {
+		merge(x, originVal, *y, XOR, xUnit, yUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opByte(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	th, val := scope.Stack.pop(), scope.Stack.peek()
+	th, thUnit := scope.Stack.pop()
+	val, valUnit := scope.Stack.peek()
+	originVal := *val
 	val.Byte(&th)
+	if evm.Config.IsPreExec {
+		merge(th, originVal, *val, BYTE, thUnit, valUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opAddmod(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y, z := scope.Stack.pop(), scope.Stack.pop(), scope.Stack.peek()
-	z.AddMod(&x, &y, z)
+	x, xUnit := scope.Stack.pop()
+	if !evm.Config.IsPreExec {
+		y, _ := scope.Stack.pop()
+		z, _ := scope.Stack.peek()
+		z.AddMod(&x, &y, z)
+	} else {
+		y, yUnit := scope.Stack.peek()
+		originVal := *y
+		y.Add(&x, y)
+		merge(x, originVal, *y, ADD, xUnit, yUnit, scope, true)
+
+		y2, yUnit2 := scope.Stack.pop()
+		z, zUnit := scope.Stack.peek()
+		originVal2 := *z
+		if z.IsZero() {
+			z.Clear()
+		} else {
+			z.Mod(&y2, z)
+		}
+		merge(y2, originVal2, *z, MOD, yUnit2, zUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opMulmod(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x, y, z := scope.Stack.pop(), scope.Stack.pop(), scope.Stack.peek()
-	z.MulMod(&x, &y, z)
+	x, xUnit := scope.Stack.pop()
+	if !evm.Config.IsPreExec {
+		y, _ := scope.Stack.pop()
+		z, _ := scope.Stack.peek()
+		z.MulMod(&x, &y, z)
+	} else {
+		y, yUnit := scope.Stack.peek()
+		originVal := *y
+		y.Mul(&x, y)
+		merge(x, originVal, *y, MUL, xUnit, yUnit, scope, true)
+
+		y2, yUnit2 := scope.Stack.pop()
+		z, zUnit := scope.Stack.peek()
+		originVal2 := *z
+		z.Mod(&y2, z)
+		merge(y2, originVal2, *z, MOD, yUnit2, zUnit, scope, true)
+	}
 	return nil, nil
 }
 
@@ -187,11 +494,16 @@ func opMulmod(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 // and pushes on the stack arg2 shifted to the left by arg1 number of bits.
 func opSHL(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Note, second operand is left in the stack; accumulate result into it, and no need to push it afterwards
-	shift, value := scope.Stack.pop(), scope.Stack.peek()
+	shift, shiftUnit := scope.Stack.pop()
+	value, valueUnit := scope.Stack.peek()
+	originVal := *value
 	if shift.LtUint64(256) {
 		value.Lsh(value, uint(shift.Uint64()))
 	} else {
 		value.Clear()
+	}
+	if evm.Config.IsPreExec {
+		merge(shift, originVal, *value, SHL, shiftUnit, valueUnit, scope, true)
 	}
 	return nil, nil
 }
@@ -201,11 +513,16 @@ func opSHL(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 // and pushes on the stack arg2 shifted to the right by arg1 number of bits with zero fill.
 func opSHR(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Note, second operand is left in the stack; accumulate result into it, and no need to push it afterwards
-	shift, value := scope.Stack.pop(), scope.Stack.peek()
+	shift, shiftUnit := scope.Stack.pop()
+	value, valueUnit := scope.Stack.peek()
+	originVal := *value
 	if shift.LtUint64(256) {
 		value.Rsh(value, uint(shift.Uint64()))
 	} else {
 		value.Clear()
+	}
+	if evm.Config.IsPreExec {
+		merge(shift, originVal, *value, SHR, shiftUnit, valueUnit, scope, true)
 	}
 	return nil, nil
 }
@@ -214,7 +531,9 @@ func opSHR(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 // The SAR instruction (arithmetic shift right) pops 2 values from the stack, first arg1 and then arg2,
 // and pushes on the stack arg2 shifted to the right by arg1 number of bits with sign extension.
 func opSAR(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	shift, value := scope.Stack.pop(), scope.Stack.peek()
+	shift, shiftUnit := scope.Stack.pop()
+	value, valueUnit := scope.Stack.peek()
+	originVal := *value
 	if shift.GtUint64(256) {
 		if value.Sign() >= 0 {
 			value.Clear()
@@ -222,15 +541,23 @@ func opSAR(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 			// Max negative shift: all bits set
 			value.SetAllOne()
 		}
+		if evm.Config.IsPreExec {
+			merge(shift, originVal, *value, SAR, shiftUnit, valueUnit, scope, true)
+		}
 		return nil, nil
 	}
 	n := uint(shift.Uint64())
 	value.SRsh(value, n)
+	if evm.Config.IsPreExec {
+		merge(shift, originVal, *value, SAR, shiftUnit, valueUnit, scope, true)
+	}
 	return nil, nil
 }
 
 func opKeccak256(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	offset, size := scope.Stack.pop(), scope.Stack.peek()
+	offset, offsetUnit := scope.Stack.pop()
+	size, sizeUnit := scope.Stack.peek()
+	originVal := *size
 	data := scope.Memory.GetPtr(offset.Uint64(), size.Uint64())
 
 	evm.hasher.Reset()
@@ -241,6 +568,16 @@ func opKeccak256(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 		evm.StateDB.AddPreimage(evm.hasherBuf, data)
 	}
 	size.SetBytes(evm.hasherBuf[:])
+	if evm.Keccak256Hashes != nil && len(data) == 2*common.HashLength {
+		hashes := make([]common.Hash, 0, len(data)/common.HashLength)
+		for i := 0; i < len(data); i += common.HashLength {
+			hashes = append(hashes, common.BytesToHash(data[i:i+common.HashLength]))
+		}
+		evm.Keccak256Hashes[evm.hasherBuf] = hashes
+	}
+	if evm.Config.IsPreExec {
+		merge(offset, originVal, *size, KECCAK256, offsetUnit, sizeUnit, scope, false)
+	}
 	return nil, nil
 }
 
@@ -250,9 +587,15 @@ func opAddress(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 }
 
 func opBalance(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	slot := scope.Stack.peek()
+	slot, _ := scope.Stack.peek()
 	address := common.Address(slot.Bytes20())
 	slot.Set(evm.StateDB.GetBalance(address))
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *slot, uint256.Int{}, "BALANCE", address)
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
+	}
 	return nil, nil
 }
 
@@ -272,12 +615,20 @@ func opCallValue(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 }
 
 func opCallDataLoad(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	x := scope.Stack.peek()
+	x, _ := scope.Stack.peek()
 	if offset, overflow := x.Uint64WithOverflow(); !overflow {
 		data := getData(scope.Contract.Input, offset, 32)
 		x.SetBytes(data)
+		if evm.Config.IsPreExec {
+			sig := x.Hex()[:]
+			scope.Signature = sig
+			scope.Stack.updateUnit(INPUT, uint256.Int{}, *uint256.NewInt(offset), *x, uint256.Int{}, "nil", common.Address{})
+		}
 	} else {
 		x.Clear()
+		if evm.Config.IsPreExec {
+			scope.Stack.updateUnit(INPUT, uint256.Int{}, uint256.Int{}, *x, uint256.Int{}, "nil", common.Address{})
+		}
 	}
 	return nil, nil
 }
@@ -289,9 +640,9 @@ func opCallDataSize(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 func opCallDataCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		memOffset  = scope.Stack.pop()
-		dataOffset = scope.Stack.pop()
-		length     = scope.Stack.pop()
+		memOffset, _  = scope.Stack.pop()
+		dataOffset, _ = scope.Stack.pop()
+		length, _     = scope.Stack.pop()
 	)
 	dataOffset64, overflow := dataOffset.Uint64WithOverflow()
 	if overflow {
@@ -312,9 +663,9 @@ func opReturnDataSize(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error)
 
 func opReturnDataCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		memOffset  = scope.Stack.pop()
-		dataOffset = scope.Stack.pop()
-		length     = scope.Stack.pop()
+		memOffset, _  = scope.Stack.pop()
+		dataOffset, _ = scope.Stack.pop()
+		length, _     = scope.Stack.pop()
 	)
 
 	offset64, overflow := dataOffset.Uint64WithOverflow()
@@ -333,8 +684,14 @@ func opReturnDataCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error)
 }
 
 func opExtCodeSize(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	slot := scope.Stack.peek()
+	slot, slotUnit := scope.Stack.peek()
 	slot.SetUint64(uint64(evm.StateDB.GetCodeSize(slot.Bytes20())))
+	if evm.Config.IsPreExec {
+		slotUnit.SetValue(*slot)
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
+	}
 	return nil, nil
 }
 
@@ -345,9 +702,9 @@ func opCodeSize(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 func opCodeCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		memOffset  = scope.Stack.pop()
-		codeOffset = scope.Stack.pop()
-		length     = scope.Stack.pop()
+		memOffset, _  = scope.Stack.pop()
+		codeOffset, _ = scope.Stack.pop()
+		length, _     = scope.Stack.pop()
 	)
 	uint64CodeOffset, overflow := codeOffset.Uint64WithOverflow()
 	if overflow {
@@ -361,11 +718,11 @@ func opCodeCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 func opExtCodeCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	var (
-		stack      = scope.Stack
-		a          = stack.pop()
-		memOffset  = stack.pop()
-		codeOffset = stack.pop()
-		length     = stack.pop()
+		stack         = scope.Stack
+		a, _          = stack.pop()
+		memOffset, _  = stack.pop()
+		codeOffset, _ = stack.pop()
+		length, _     = stack.pop()
 	)
 	uint64CodeOffset, overflow := codeOffset.Uint64WithOverflow()
 	if overflow {
@@ -375,6 +732,11 @@ func opExtCodeCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	code := evm.StateDB.GetCode(addr)
 	codeCopy := getData(code, uint64CodeOffset, length.Uint64())
 	scope.Memory.Set(memOffset.Uint64(), length.Uint64(), codeCopy)
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
+	}
 
 	return nil, nil
 }
@@ -406,12 +768,18 @@ func opExtCodeCopy(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 //  6. Caller tries to get the code hash for an account which is marked as deleted, this
 //     account should be regarded as a non-existent account and zero should be returned.
 func opExtCodeHash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	slot := scope.Stack.peek()
+	slot, slotUnit := scope.Stack.peek()
 	address := common.Address(slot.Bytes20())
 	if evm.StateDB.Empty(address) {
 		slot.Clear()
 	} else {
 		slot.SetBytes(evm.StateDB.GetCodeHash(address).Bytes())
+	}
+	if evm.Config.IsPreExec {
+		slotUnit.SetValue(*slot)
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
 	}
 	return nil, nil
 }
@@ -419,11 +787,15 @@ func opExtCodeHash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opGasprice(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	v, _ := uint256.FromBig(evm.GasPrice)
 	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "GASPRICE", common.Address{})
+	}
 	return nil, nil
 }
 
 func opBlockhash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	num := scope.Stack.peek()
+	num, numUnit := scope.Stack.peek()
+	originNum := *num
 	num64, overflow := num.Uint64WithOverflow()
 	if overflow {
 		num.Clear()
@@ -449,39 +821,64 @@ func opBlockhash(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	} else {
 		num.Clear()
 	}
+	if evm.Config.IsPreExec {
+		numUnit.SetValue(*num)
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *num, originNum, "BLOCKHASH", common.Address{})
+	}
 	return nil, nil
 }
 
 func opCoinbase(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	scope.Stack.push(new(uint256.Int).SetBytes(evm.Context.Coinbase.Bytes()))
+	v := new(uint256.Int).SetBytes(evm.Context.Coinbase.Bytes())
+	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "COINBASE", common.Address{})
+	}
 	return nil, nil
 }
 
 func opTimestamp(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	scope.Stack.push(new(uint256.Int).SetUint64(evm.Context.Time))
+	v := new(uint256.Int).SetUint64(evm.Context.Time)
+	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "TIMESTAMP", common.Address{})
+	}
 	return nil, nil
 }
 
 func opNumber(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	v, _ := uint256.FromBig(evm.Context.BlockNumber)
 	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "NUMBER", common.Address{})
+	}
 	return nil, nil
 }
 
 func opDifficulty(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	v, _ := uint256.FromBig(evm.Context.Difficulty)
 	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "DIFFICULTY", common.Address{})
+	}
 	return nil, nil
 }
 
 func opRandom(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	v := new(uint256.Int).SetBytes(evm.Context.Random.Bytes())
 	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "RANDOM", common.Address{})
+	}
 	return nil, nil
 }
 
 func opGasLimit(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	scope.Stack.push(new(uint256.Int).SetUint64(evm.Context.GasLimit))
+	v := new(uint256.Int).SetUint64(evm.Context.GasLimit)
+	scope.Stack.push(v)
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, uint256.Int{}, uint256.Int{}, *v, uint256.Int{}, "GASLIMIT", common.Address{})
+	}
 	return nil, nil
 }
 
@@ -491,29 +888,42 @@ func opPop(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 }
 
 func opMload(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	v := scope.Stack.peek()
+	v, unit := scope.Stack.peek()
 	offset := v.Uint64()
 	v.SetBytes(scope.Memory.GetPtr(offset, 32))
+	if evm.Config.IsPreExec {
+		unit.SetValue(*v)
+	}
 	return nil, nil
 }
 
 func opMstore(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	mStart, val := scope.Stack.pop(), scope.Stack.pop()
+	mStart, _ := scope.Stack.pop()
+	val, _ := scope.Stack.pop()
 	scope.Memory.Set32(mStart.Uint64(), &val)
 	return nil, nil
 }
 
 func opMstore8(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	off, val := scope.Stack.pop(), scope.Stack.pop()
+	off, _ := scope.Stack.pop()
+	val, _ := scope.Stack.pop()
 	scope.Memory.store[off.Uint64()] = byte(val.Uint64())
 	return nil, nil
 }
 
 func opSload(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	loc := scope.Stack.peek()
+	loc, _ := scope.Stack.peek()
+	tmpLoc := *loc
 	hash := common.Hash(loc.Bytes32())
 	val := evm.StateDB.GetState(scope.Contract.Address(), hash)
 	loc.SetBytes(val.Bytes())
+	if evm.Config.IsPreExec {
+		scope.Stack.updateUnit(STATE, tmpLoc, uint256.Int{}, *loc, uint256.Int{}, "nil", common.Address{})
+		scope.TmpState.InsertUnit(scope.Contract.Address(), tmpLoc)
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		ret.CacheReadSet()
+	}
 	return nil, nil
 }
 
@@ -521,9 +931,68 @@ func opSstore(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.readOnly {
 		return nil, ErrWriteProtection
 	}
-	loc := scope.Stack.pop()
-	val := scope.Stack.pop()
-	evm.StateDB.SetState(scope.Contract.Address(), loc.Bytes32(), val.Bytes32())
+	loc, locUnit := scope.Stack.pop()
+	val, valUnit := scope.Stack.pop()
+	if !evm.Config.IsPreExec {
+		evm.StateDB.SetState(scope.Contract.Address(), loc.Bytes32(), val.Bytes32())
+	} else {
+		var (
+			updatedVal uint256.Int
+			offset     uint256.Int
+			isCompact  bool
+			signExtend bool
+			err        error
+		)
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		if fragment, ok := scope.TmpState.GetFragment(scope.Contract.Address(), loc); ok {
+			stateUnit, ok2 := valUnit.(*StateUnit)
+			if ok2 && fragment.GetCompact() {
+				offset = stateUnit.GetOffset()
+				bits := stateUnit.GetBits()
+				ops := stateUnit.GetTracer()
+				if offset.Uint64() > 0 && bits < 256 {
+					isCompact = true
+					if len(ops) > 0 {
+						attaching := ops[len(ops)-1].GetAttaching()
+						if opUnit, ok3 := attaching.(*StateUnit); ok3 {
+							signExtend = opUnit.GetSignExtend()
+							if signExtend {
+								stateUnit.SetSignExtend()
+							}
+						}
+					}
+					updatedVal = fetchStorageVal(val, offset, bits, signExtend)
+				} else {
+					isCompact = false
+					updatedVal = val
+				}
+			} else {
+				isCompact = false
+				updatedVal = val
+			}
+		} else {
+			isCompact = false
+			updatedVal = val
+			scope.TmpState.Space[common.AddrU256{Addr: scope.Contract.Address(), U256: loc}] = NewFragment()
+		}
+		ret.CacheSStoreInfo(scope.Contract.Address(), updatedVal, locUnit.Copy(), valUnit.Copy(), isCompact)
+
+		if evm.Config.VarTable.VarExist(scope.Contract.Address(), loc.Bytes32(), offset) {
+			tip := evm.TxContext.GasTip
+			if isCompact {
+				_, err = evm.Config.MVCache.SetCompactedStorageForWrite(scope.Contract.Address(), loc,
+					updatedVal, offset, txID, tip)
+			} else {
+				_, err = evm.Config.MVCache.SetStorageForWrite(scope.Contract.Address(), loc,
+					updatedVal, txID, tip)
+			}
+			if err != nil {
+				return nil, err
+			}
+		}
+		ret.CacheWriteSet()
+	}
 	return nil, nil
 }
 
@@ -531,7 +1000,7 @@ func opJump(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.abort.Load() {
 		return nil, errStopToken
 	}
-	pos := scope.Stack.pop()
+	pos, _ := scope.Stack.pop()
 	if !scope.Contract.validJumpdest(&pos) {
 		return nil, ErrInvalidJump
 	}
@@ -543,7 +1012,49 @@ func opJumpi(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.abort.Load() {
 		return nil, errStopToken
 	}
-	pos, cond := scope.Stack.pop(), scope.Stack.pop()
+	pos, _ := scope.Stack.pop()
+	cond, condUnit := scope.Stack.pop()
+	if evm.Config.IsPreExec {
+		if sUnit, ok := condUnit.(*StateUnit); ok {
+			ops := sUnit.GetTracer()
+			if len(ops) > 0 {
+				latestTr := ops[len(ops)-1]
+				if latestTr.GetOps() == SUB {
+					opUnit := latestTr.GetAttaching()
+					firstVal, secondVal, res, err := branchRecord(*pc, pos.Uint64(), evm, scope, sUnit, opUnit, "EQ")
+					if err != nil {
+						return nil, err
+					}
+					txID := evm.TxContext.ID
+					ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+					switch res {
+					case taken:
+						ret.UpdateDirection(1)
+						return nil, nil
+					case notTaken:
+						if !scope.Contract.validJumpdest(&pos) {
+							return nil, ErrInvalidJump
+						}
+						*pc = pos.Uint64() - 1 // pc will be increased by the evm loop
+						ret.UpdateDirection(0)
+						return nil, nil
+					case uncertain:
+						firstVal.Sub(&firstVal, &secondVal)
+						if !firstVal.IsZero() {
+							if !scope.Contract.validJumpdest(&pos) {
+								return nil, ErrInvalidJump
+							}
+							*pc = pos.Uint64() - 1 // pc will be increased by the evm loop
+							ret.UpdateDirection(0)
+						} else {
+							ret.UpdateDirection(1)
+						}
+						return nil, nil
+					}
+				}
+			}
+		}
+	}
 	if !cond.IsZero() {
 		if !scope.Contract.validJumpdest(&pos) {
 			return nil, ErrInvalidJump
@@ -657,10 +1168,11 @@ func opCreate(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 		return nil, ErrWriteProtection
 	}
 	var (
-		value        = scope.Stack.pop()
-		offset, size = scope.Stack.pop(), scope.Stack.pop()
-		input        = scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
-		gas          = scope.Contract.Gas
+		value, _  = scope.Stack.pop()
+		offset, _ = scope.Stack.pop()
+		size, _   = scope.Stack.pop()
+		input     = scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
+		gas       = scope.Contract.Gas
 	)
 	if evm.chainRules.IsEIP150 {
 		gas -= gas / 64
@@ -700,9 +1212,10 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 		return nil, ErrWriteProtection
 	}
 	var (
-		endowment    = scope.Stack.pop()
-		offset, size = scope.Stack.pop(), scope.Stack.pop()
-		salt         = scope.Stack.pop()
+		endowment, _ = scope.Stack.pop()
+		offset, _    = scope.Stack.pop()
+		size, _      = scope.Stack.pop()
+		salt, _      = scope.Stack.pop()
 		input        = scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
 		gas          = scope.Contract.Gas
 	)
@@ -733,12 +1246,22 @@ func opCreate2(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	stack := scope.Stack
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.CacheSnapshot(stack, scope.Memory, *pc, 0, scope.Contract, evm.depth)
+	}
 	// Pop gas. The actual gas in evm.callGasTemp.
 	// We can use this as a temporary value
-	temp := stack.pop()
+	temp, _ := stack.pop()
 	gas := evm.callGasTemp
 	// Pop other call parameters.
-	addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+	addr, _ := stack.pop()
+	value, _ := stack.pop()
+	inOffset, _ := stack.pop()
+	inSize, _ := stack.pop()
+	retOffset, _ := stack.pop()
+	retSize, _ := stack.pop()
 	toAddr := common.Address(addr.Bytes20())
 	// Get the arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
@@ -770,11 +1293,23 @@ func opCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opCallCode(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Pop gas. The actual gas is in evm.callGasTemp.
 	stack := scope.Stack
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		if evm.Config.IsPreExec {
+			res.CacheSnapshot(stack, scope.Memory, *pc, 0, scope.Contract, evm.depth)
+		}
+	}
 	// We use it as a temporary value
-	temp := stack.pop()
+	temp, _ := stack.pop()
 	gas := evm.callGasTemp
 	// Pop other call parameters.
-	addr, value, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+	addr, _ := stack.pop()
+	value, _ := stack.pop()
+	inOffset, _ := stack.pop()
+	inSize, _ := stack.pop()
+	retOffset, _ := stack.pop()
+	retSize, _ := stack.pop()
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
@@ -802,12 +1337,23 @@ func opCallCode(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 
 func opDelegateCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	stack := scope.Stack
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		if evm.Config.IsPreExec {
+			res.CacheSnapshot(stack, scope.Memory, *pc, 0, scope.Contract, evm.depth)
+		}
+	}
 	// Pop gas. The actual gas is in evm.callGasTemp.
 	// We use it as a temporary value
-	temp := stack.pop()
+	temp, _ := stack.pop()
 	gas := evm.callGasTemp
 	// Pop other call parameters.
-	addr, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+	addr, _ := stack.pop()
+	inOffset, _ := stack.pop()
+	inSize, _ := stack.pop()
+	retOffset, _ := stack.pop()
+	retSize, _ := stack.pop()
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
@@ -832,11 +1378,22 @@ func opDelegateCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 func opStaticCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	// Pop gas. The actual gas is in evm.callGasTemp.
 	stack := scope.Stack
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		if evm.Config.IsPreExec {
+			res.CacheSnapshot(stack, scope.Memory, *pc, 0, scope.Contract, evm.depth)
+		}
+	}
 	// We use it as a temporary value
-	temp := stack.pop()
+	temp, _ := stack.pop()
 	gas := evm.callGasTemp
 	// Pop other call parameters.
-	addr, inOffset, inSize, retOffset, retSize := stack.pop(), stack.pop(), stack.pop(), stack.pop(), stack.pop()
+	addr, _ := stack.pop()
+	inOffset, _ := stack.pop()
+	inSize, _ := stack.pop()
+	retOffset, _ := stack.pop()
+	retSize, _ := stack.pop()
 	toAddr := common.Address(addr.Bytes20())
 	// Get arguments from the memory.
 	args := scope.Memory.GetPtr(inOffset.Uint64(), inSize.Uint64())
@@ -859,25 +1416,48 @@ func opStaticCall(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 }
 
 func opReturn(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	offset, size := scope.Stack.pop(), scope.Stack.pop()
+	offset, _ := scope.Stack.pop()
+	size, _ := scope.Stack.pop()
 	ret := scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
+	if evm.Config.IsPreExec && evm.depth == 1 {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.GenerateFinalSnapshot(ret, scope.Contract.Gas, errStopToken)
+	}
 
 	return ret, errStopToken
 }
 
 func opRevert(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	offset, size := scope.Stack.pop(), scope.Stack.pop()
+	offset, _ := scope.Stack.pop()
+	size, _ := scope.Stack.pop()
 	ret := scope.Memory.GetCopy(offset.Uint64(), size.Uint64())
 
 	evm.returnData = ret
+	if evm.Config.IsPreExec && evm.depth == 1 {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.GenerateFinalSnapshot(ret, scope.Contract.Gas, ErrExecutionReverted)
+	}
 	return ret, ErrExecutionReverted
 }
 
 func opUndefined(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
-	return nil, &ErrInvalidOpCode{opcode: OpCode(scope.Contract.Code[*pc])}
+	err := &ErrInvalidOpCode{opcode: OpCode(scope.Contract.Code[*pc])}
+	if evm.Config.IsPreExec && evm.depth == 1 {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.GenerateFinalSnapshot(nil, scope.Contract.Gas, err)
+	}
+	return nil, err
 }
 
 func opStop(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
+	if evm.Config.IsPreExec && evm.depth == 1 {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.GenerateFinalSnapshot(nil, scope.Contract.Gas, errStopToken)
+	}
 	return nil, errStopToken
 }
 
@@ -885,7 +1465,7 @@ func opSelfdestruct(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 	if evm.readOnly {
 		return nil, ErrWriteProtection
 	}
-	beneficiary := scope.Stack.pop()
+	beneficiary, _ := scope.Stack.pop()
 	balance := evm.StateDB.GetBalance(scope.Contract.Address())
 	evm.StateDB.AddBalance(beneficiary.Bytes20(), balance, tracing.BalanceIncreaseSelfdestruct)
 	evm.StateDB.SelfDestruct(scope.Contract.Address())
@@ -897,6 +1477,15 @@ func opSelfdestruct(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, error) {
 			tracer.OnExit(evm.depth, []byte{}, 0, nil, false)
 		}
 	}
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.CacheReadSet()
+		res.CacheWriteSet()
+		if evm.depth == 1 {
+			res.GenerateFinalSnapshot(nil, scope.Contract.Gas, errStopToken)
+		}
+	}
 	return nil, errStopToken
 }
 
@@ -904,7 +1493,7 @@ func opSelfdestruct6780(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, erro
 	if evm.readOnly {
 		return nil, ErrWriteProtection
 	}
-	beneficiary := scope.Stack.pop()
+	beneficiary, _ := scope.Stack.pop()
 	balance := evm.StateDB.GetBalance(scope.Contract.Address())
 	evm.StateDB.SubBalance(scope.Contract.Address(), balance, tracing.BalanceDecreaseSelfdestruct)
 	evm.StateDB.AddBalance(beneficiary.Bytes20(), balance, tracing.BalanceIncreaseSelfdestruct)
@@ -915,6 +1504,15 @@ func opSelfdestruct6780(pc *uint64, evm *EVM, scope *ScopeContext) ([]byte, erro
 		}
 		if tracer.OnExit != nil {
 			tracer.OnExit(evm.depth, []byte{}, 0, nil, false)
+		}
+	}
+	if evm.Config.IsPreExec {
+		txID := evm.TxContext.ID
+		res, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		res.CacheReadSet()
+		res.CacheWriteSet()
+		if evm.depth == 1 {
+			res.GenerateFinalSnapshot(nil, scope.Contract.Gas, errStopToken)
 		}
 	}
 	return nil, errStopToken
@@ -930,9 +1528,10 @@ func makeLog(size int) executionFunc {
 		}
 		topics := make([]common.Hash, size)
 		stack := scope.Stack
-		mStart, mSize := stack.pop(), stack.pop()
+		mStart, _ := stack.pop()
+		mSize, _ := stack.pop()
 		for i := 0; i < size; i++ {
-			addr := stack.pop()
+			addr, _ := stack.pop()
 			topics[i] = addr.Bytes32()
 		}
 
@@ -1008,4 +1607,387 @@ func makeDup(size int) executionFunc {
 		scope.Stack.dup(size)
 		return nil, nil
 	}
+}
+
+const (
+	skip = iota
+	uncertain
+	taken
+	notTaken
+)
+
+// merge updates tracking units on the stack when performing some computation operations (merges top two units on the stack)
+func merge(topVal, originVal, curVal uint256.Int, operation OpCode, topUnit, changedUnit TracingUnit, scope *ScopeContext, record bool) {
+	if unit, ok := changedUnit.(*StateUnit); ok {
+		unit.SetValue(curVal)
+		if record {
+			switch u := topUnit.(type) {
+			case *NormalUnit:
+				unit.Record(operation, topVal, true, u.Copy())
+			case *CallDataUnit:
+				unit.Record(operation, topVal, true, u.Copy())
+			case *StateUnit:
+				if u.GetBlockEnv() == "nil" && unit.GetBlockEnv() != "nil" {
+					u.SetValue(curVal)
+					unit.SetValue(originVal)
+					u.Record(operation, originVal, false, unit.Copy())
+					scope.Stack.override(u)
+				} else {
+					unit.Record(operation, topVal, true, u.Copy())
+				}
+			}
+		}
+	} else if unit2, ok2 := topUnit.(*StateUnit); ok2 {
+		// in case that storage compact has happened
+		unit2.SetValue(curVal)
+		if record {
+			switch u := changedUnit.(type) {
+			case *NormalUnit:
+				unit2.Record(operation, originVal, false, u.Copy())
+			case *CallDataUnit:
+				unit2.Record(operation, originVal, false, u.Copy())
+			}
+		}
+		scope.Stack.override(unit2)
+	} else if unit3, ok3 := topUnit.(*CallDataUnit); ok3 {
+		unit3.SetValue(curVal)
+		scope.Stack.override(unit3)
+	} else {
+		changedUnit.SetValue(curVal)
+	}
+}
+
+// branchRecord records the relevant branch (related to state variables) info into the state variable table
+func branchRecord(pc, jumpPc uint64, evm *EVM, scope *ScopeContext, topUnit, secondUnit TracingUnit, judgement string) (uint256.Int, uint256.Int, int, error) {
+	var branchID string
+	var compact bool
+	tunit, ok1 := topUnit.(*StateUnit)
+	sunit, ok2 := secondUnit.(*StateUnit)
+	if ok1 {
+		var entry *Entry
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		// cache the current snapshot before branch
+		ret.CacheSnapshot(scope.Stack, scope.Memory, pc, jumpPc, scope.Contract, evm.depth)
+
+		slot := tunit.GetSlot()
+		offset := tunit.GetOffset()
+		bits := tunit.GetBits()
+		if offset.Uint64() > 0 && bits < 256 {
+			compact = true
+		}
+		signature := scope.Signature
+		contractAddr := scope.Contract.Address()
+
+		if ok2 {
+			slot2 := sunit.GetSlot()
+			offset2 := sunit.GetOffset()
+			bits2 := sunit.GetBits()
+			value := sunit.GetStorageValue()
+			newVar := NewVarInfo(slot2, offset2, bits2)
+			branchID = GenerateBranchID(signature, true, newVar, value)
+			// The branch including the variable relevant to the block environment will not be stored in the branch info table
+			// Instead, it is only stored in the pre-execution table
+			if tunit.GetBlockEnv() == "nil" {
+				entry = branchQuery(evm, contractAddr, common.Hash(slot.Bytes32()), branchID, compact, true, offset, value, newVar)
+			}
+			// store the branch info into the pre-execution table
+			ret.UpdateBranchInfo(contractAddr, tunit.Copy(), sunit.Copy(), true, true, branchID, judgement)
+		} else {
+			value := secondUnit.GetValue()
+			branchID = GenerateBranchID(signature, false, nil, value)
+			if tunit.GetBlockEnv() == "nil" {
+				entry = branchQuery(evm, contractAddr, common.Hash(slot.Bytes32()), branchID, compact, false, offset, value, nil)
+			}
+			// store the branch info into the pre-execution table
+			ret.UpdateBranchInfo(contractAddr, tunit.Copy(), secondUnit.Copy(), false, true, branchID, judgement)
+		}
+
+		// We do not need to perform prediction of branches including the variables relevant to the block environment
+		if tunit.GetBlockEnv() == "nil" {
+			// utilize the perceptron model to perform prediction
+			if evm.Config.IsPreExec {
+				res := entry.Predict(offset, branchID)
+				if res == taken || res == notTaken {
+					// obtain relatively certain prediction result, directly output it
+					return uint256.Int{}, uint256.Int{}, res, nil
+				}
+			}
+
+			// utilize the ordering-based prediction to fetch the latest value from the multi-version cache
+			firstVal, err := GetComparedVal(evm, evm.TxContext.ID, contractAddr, slot, offset, bits, tunit, compact, true)
+			if err != nil {
+				return uint256.Int{}, uint256.Int{}, uncertain, err
+			}
+			if ok2 {
+				slot2 := sunit.GetSlot()
+				offset2 := sunit.GetOffset()
+				bits2 := sunit.GetBits()
+				compact2 := offset2.Uint64() > 0 && bits2 < 256
+				updatedVal, err2 := GetComparedVal(evm, evm.TxContext.ID, contractAddr, slot2, offset2, bits2, sunit, compact2, true)
+				if err2 != nil {
+					return uint256.Int{}, uint256.Int{}, uncertain, err2
+				}
+				entry.UpdateJudgementVal(sunit.GetValue(), updatedVal, offset, branchID)
+			}
+			_, secVal := entry.GetJudgementVal(offset, branchID)
+			return firstVal, secVal, uncertain, nil
+		}
+	} else if !ok1 && ok2 {
+		txID := evm.TxContext.ID
+		ret, _ := evm.Config.PreExecutionTable.GetResult(txID)
+		// cache the current snapshot before branch
+		ret.CacheSnapshot(scope.Stack, scope.Memory, pc, jumpPc, scope.Contract, evm.depth)
+
+		slot := sunit.GetSlot()
+		offset := sunit.GetOffset()
+		bits := sunit.GetBits()
+		if offset.Uint64() > 0 && bits < 256 {
+			compact = true
+		}
+		signature := scope.Signature
+		contractAddr := scope.Contract.Address()
+		value := topUnit.GetValue()
+		branchID = GenerateBranchID(signature, false, nil, value)
+		// store the branch info into the pre-execution table
+		ret.UpdateBranchInfo(contractAddr, sunit.Copy(), topUnit.Copy(), false, false, branchID, judgement)
+
+		if sunit.GetBlockEnv() == "nil" {
+			entry := branchQuery(evm, contractAddr, common.Hash(slot.Bytes32()), branchID, compact, false, offset, value, nil)
+			// utilize the perceptron model to perform prediction
+			if evm.Config.IsPreExec {
+				res := entry.Predict(offset, branchID)
+				if res == taken || res == notTaken {
+					// obtain relatively certain prediction result, directly output it
+					return uint256.Int{}, uint256.Int{}, res, nil
+				}
+			}
+
+			// utilize the ordering-based prediction to fetch the latest value from the multi-version cache
+			secVal, err := GetComparedVal(evm, evm.TxContext.ID, contractAddr, slot, offset, bits, sunit, compact, true)
+			if err != nil {
+				return uint256.Int{}, uint256.Int{}, uncertain, err
+			}
+			_, firstVal := entry.GetJudgementVal(offset, branchID)
+			return firstVal, secVal, uncertain, nil
+		}
+	}
+	return uint256.Int{}, uint256.Int{}, skip, nil
+}
+
+// branchQuery queries if the branch exists, if not, creates a new one
+func branchQuery(evm *EVM, contractAddr common.Address, slot common.Hash, branchID string, compact, isVar bool, offset, value uint256.Int, varInfo *VarInfo) *Entry {
+	st, err := evm.Config.VarTable.GetSubTable(contractAddr)
+	if err != nil {
+		// the table does not exist
+		st = evm.Config.VarTable.InsertSubTable(contractAddr)
+		entry := st.InsertEntry(slot, compact)
+		entry.GenerateBranchInfo(branchID, offset, value, isVar, varInfo, evm.Config.VarTable.GetEpoch())
+		return entry
+	}
+	entry, err2 := st.GetEntry(slot)
+	if err2 != nil {
+		// the entry does not exist
+		entry = st.InsertEntry(slot, compact)
+		entry.GenerateBranchInfo(branchID, offset, value, isVar, varInfo, evm.Config.VarTable.GetEpoch())
+		return entry
+	}
+	exist := entry.BranchExist(offset, branchID)
+	if !exist {
+		// the branch does not exist
+		entry.GenerateBranchInfo(branchID, offset, value, isVar, varInfo, evm.Config.VarTable.GetEpoch())
+		return entry
+	}
+	return entry
+}
+
+// fetchInMVCache fetches the latest state version in multi-version cache
+func fetchInMVCache(evm *EVM, txID common.Hash, contractAddr common.Address, slot, offset uint256.Int, compact bool) (uint256.Int, error) {
+	tip := evm.TxContext.GasTip
+	if compact {
+		writeVersion, err := evm.Config.MVCache.GetCompactedStorageVersion(contractAddr, slot, offset, tip)
+		if err != nil {
+			return uint256.Int{}, err
+		}
+		// record the read operation
+		err2 := evm.Config.MVCache.SetCompactedStorageForRead(contractAddr, slot, offset, txID, tip)
+		if err2 != nil {
+			return uint256.Int{}, err2
+		}
+		return writeVersion.GetVal(), nil
+	} else {
+		writeVersion, err := evm.Config.MVCache.GetStorageVersion(contractAddr, slot, tip)
+		if err != nil {
+			return uint256.Int{}, err
+		}
+		// record the read operation
+		err2 := evm.Config.MVCache.SetStorageForRead(contractAddr, slot, txID, tip)
+		if err2 != nil {
+			return uint256.Int{}, err2
+		}
+		return writeVersion.GetVal(), nil
+	}
+}
+
+// fetchInStateDB fetches the latest state version in stateDB
+func fetchInStateDB(evm *EVM, contractAddr common.Address, slot, offset uint256.Int, bits int, compact bool, unit *StateUnit) uint256.Int {
+	var newVal uint256.Int
+	slotVal := evm.StateDB.GetState(contractAddr, slot.Bytes32())
+	newVal.SetBytes(slotVal.Bytes())
+	// obtain the state value from the compacted storage
+	if compact {
+		signExtend := unit.GetSignExtend()
+		newVal = fetchStorageVal(newVal, offset, bits, signExtend)
+	}
+	return newVal
+}
+
+// computeTmpVar computes the latest temp variable value based on the state variable related to the branch
+func computeTmpVar(evm *EVM, txID common.Hash, contractAddr common.Address, newVal uint256.Int, su *StateUnit, isMultiVersion bool, depth int) (uint256.Int, error) {
+	depth++
+	// prevent stack overflow
+	if depth > 10 {
+		return su.GetValue(), errors.New("stack overflow")
+	}
+
+	for _, t := range su.opTracer {
+		var (
+			tmpVal, newVal2 uint256.Int
+			noLoop          bool
+			err             error
+		)
+		unit := t.GetAttaching()
+		su2, ok := unit.(*StateUnit)
+		if ok {
+			var compact bool
+			slot := su2.GetSlot()
+			offset := su2.GetOffset()
+			bits := su2.GetBits()
+			if offset.Uint64() > 0 && bits < 256 {
+				compact = true
+			}
+			notEnv := su2.GetBlockEnv() == "nil"
+			if isMultiVersion {
+				if notEnv {
+					newVal2, err = fetchInMVCache(evm, txID, contractAddr, slot, offset, compact)
+					if err != nil {
+						if err.Error() == "not found" {
+							newVal2 = su2.GetStorageValue()
+						} else {
+							return uint256.Int{}, err
+						}
+					}
+				} else {
+					noLoop = true
+					tmpVal = t.GetVal()
+				}
+			} else {
+				if notEnv {
+					newVal2 = fetchInStateDB(evm, contractAddr, slot, offset, bits, compact, su2)
+				} else {
+					// directly fetch the current blockchain environment
+					newVal2 = GetEnvValue(su2.GetBlockEnv(), evm, su2.GetBlockNum(), su2.GetBalAddr())
+				}
+			}
+			if !su2.Compare() && !noLoop {
+				tmpVal, err = computeTmpVar(evm, txID, contractAddr, newVal2, su2, isMultiVersion, depth)
+				if err != nil {
+					if err.Error() == "stack overflow" {
+						return tmpVal, err
+					}
+					return uint256.Int{}, err
+				}
+			}
+		} else {
+			tmpVal = t.GetVal()
+		}
+		direction := t.GetDirection()
+		if direction {
+			err = Compute(&tmpVal, &newVal, t.op)
+			if err != nil {
+				return uint256.Int{}, err
+			}
+		} else {
+			err = Compute(&newVal, &tmpVal, t.op)
+			if err != nil {
+				return uint256.Int{}, err
+			}
+			newVal = tmpVal
+		}
+	}
+
+	return newVal, nil
+}
+
+// GetComparedVal obtains the latest compared value based on whether the current value is not equal to the storage value
+func GetComparedVal(evm *EVM, txID common.Hash, contractAddr common.Address, slot, offset uint256.Int, bits int, unit *StateUnit, compact, isMultiVersion bool) (uint256.Int, error) {
+	var (
+		newVal uint256.Int
+		err    error
+	)
+
+	if isMultiVersion {
+		newVal, err = fetchInMVCache(evm, txID, contractAddr, slot, offset, compact)
+		if err != nil {
+			if err.Error() == "not found" {
+				newVal = unit.GetStorageValue()
+			} else {
+				return uint256.Int{}, err
+			}
+		}
+	} else {
+		if unit.GetBlockEnv() == "nil" {
+			newVal = fetchInStateDB(evm, contractAddr, slot, offset, bits, compact, unit)
+		} else {
+			// directly fetch the current blockchain environment
+			newVal = GetEnvValue(unit.GetBlockEnv(), evm, unit.GetBlockNum(), unit.GetBalAddr())
+		}
+	}
+
+	if !unit.Compare() { // In case of storing a compact variable, its storage value must be different from the current value
+		updatedVal, err := computeTmpVar(evm, txID, contractAddr, newVal, unit, isMultiVersion, 0)
+		if err != nil && err.Error() != "stack overflow" {
+			return uint256.Int{}, err
+		}
+		return updatedVal, nil
+	}
+	return newVal, nil
+}
+
+// fetchStorageVal fetches the value of state variable that is stored in the slot compactly
+func fetchStorageVal(slotVal, offset uint256.Int, bits int, signExtend bool) uint256.Int {
+	result := new(uint256.Int)
+	if signExtend {
+		// 有符号的变量需要符号扩展，取值操作略有不同
+		result.Div(&slotVal, &offset)
+		result.ExtendSign(result, uint256.NewInt(uint64(bits/8-1)))
+	} else {
+		result.Div(&slotVal, &offset)
+		mask := MakeMask(bits)
+		result.And(mask, result)
+	}
+	return *result
+}
+
+// MakeMask creates a mask code for storage compact
+func MakeMask(bits int) *uint256.Int {
+	var buf []byte
+	for i := 0; i < bits/8; i++ {
+		buf = append(buf, 255)
+	}
+	integer := new(uint256.Int)
+	mask := integer.SetBytes(buf)
+	return mask
+}
+
+// isMask identifies if a stack value is a mask code
+func isMask(x uint256.Int) bool {
+	var not bool
+	for _, str := range x.Hex()[2:] {
+		if string(str) != "f" && string(str) != "0" {
+			not = true
+			break
+		}
+	}
+	return !not
 }

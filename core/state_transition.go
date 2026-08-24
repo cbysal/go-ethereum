@@ -170,10 +170,17 @@ type Message struct {
 	// - From is not verified to be an EOA
 	// - GasLimit is not checked against the protocol defined tx gaslimit
 	SkipTransactionChecks bool
+
+	Tip    *big.Int
+	TxHash common.Hash
 }
 
 // TransactionToMessage converts a transaction into a Message.
 func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.Int) (*Message, error) {
+	tip, err := tx.EffectiveGasTip(baseFee)
+	if err != nil {
+		return nil, err
+	}
 	msg := &Message{
 		Nonce:                 tx.Nonce(),
 		GasLimit:              tx.Gas(),
@@ -189,6 +196,8 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 		SkipTransactionChecks: false,
 		BlobHashes:            tx.BlobHashes(),
 		BlobGasFeeCap:         tx.BlobGasFeeCap(),
+		Tip:                   tip,
+		TxHash:                tx.Hash(),
 	}
 	// If baseFee provided, set gasPrice to effectiveGasPrice.
 	if baseFee != nil {
@@ -197,7 +206,6 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 			msg.GasPrice = msg.GasFeeCap
 		}
 	}
-	var err error
 	msg.From, err = types.Sender(s, tx)
 	return msg, err
 }
@@ -209,9 +217,9 @@ func TransactionToMessage(tx *types.Transaction, s types.Signer, baseFee *big.In
 // the gas used (which includes gas refunds) and an error if it failed. An error always
 // indicates a core error meaning that the message would always fail for that particular
 // state and would never be accepted within a block.
-func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool) (*ExecutionResult, error) {
+func ApplyMessage(evm *vm.EVM, msg *Message, gp *GasPool, fast bool, gas uint64, snapshot *vm.FinalSnapshot) (*ExecutionResult, error) {
 	evm.SetTxContext(NewEVMTxContext(msg))
-	return newStateTransition(evm, msg, gp).execute()
+	return newStateTransition(evm, msg, gp).execute(fast, gas, snapshot)
 }
 
 // stateTransition represents a state transition.
@@ -419,7 +427,7 @@ func (st *stateTransition) preCheck() error {
 //
 // However if any consensus issue encountered, return the error directly with
 // nil evm execution result.
-func (st *stateTransition) execute() (*ExecutionResult, error) {
+func (st *stateTransition) execute(fast bool, remainingGas uint64, final *vm.FinalSnapshot) (*ExecutionResult, error) {
 	// First check this message satisfies all consensus rules before
 	// applying the message. The rules include these clauses
 	//
@@ -520,7 +528,15 @@ func (st *stateTransition) execute() (*ExecutionResult, error) {
 		}
 
 		// Execute the transaction's call.
-		ret, st.gasRemaining, vmerr = st.evm.Call(msg.From, st.to(), msg.Data, st.gasRemaining, value)
+		if !fast {
+			ret, st.gasRemaining, vmerr = st.evm.Call(msg.From, st.to(), msg.Data, st.gasRemaining, value)
+		} else if final == nil {
+			ret, st.gasRemaining, vmerr = st.evm.Call(msg.From, st.to(), msg.Data, remainingGas, uint256.MustFromBig(msg.Value))
+		} else {
+			ret = final.GetResult()
+			st.gasRemaining = final.GetGas()
+			vmerr = final.GetError()
+		}
 	}
 
 	// Record the gas used excluding gas refunds. This value represents the actual

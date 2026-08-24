@@ -291,3 +291,19 @@ func (s *hookedStateDB) Finalise(deleteEmptyObjects bool) {
 		}
 	}
 }
+
+func (s *hookedStateDB) IntermediateRoot(deleteEmptyObjects bool) common.Hash {
+	return s.inner.IntermediateRoot(deleteEmptyObjects)
+}
+
+func (s *hookedStateDB) GetLogs(hash common.Hash, blockNumber uint64, blockHash common.Hash, blockTime uint64) []*types.Log {
+	return s.inner.GetLogs(hash, blockNumber, blockHash, blockTime)
+}
+
+func (s *hookedStateDB) IsVerkle() bool {
+	return s.inner.IsVerkle()
+}
+
+func (s *hookedStateDB) TxIndex() int {
+	return s.inner.TxIndex()
+}

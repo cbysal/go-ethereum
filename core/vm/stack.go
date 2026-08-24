@@ -19,12 +19,16 @@ package vm
 import (
 	"sync"
 
+	"github.com/ethereum/go-ethereum/common"
 	"github.com/holiman/uint256"
 )
 
 var stackPool = sync.Pool{
 	New: func() interface{} {
-		return &Stack{data: make([]uint256.Int, 0, 16)}
+		return &Stack{
+			data:   make([]uint256.Int, 0, 16),
+			tracer: make([]TracingUnit, 0, 16),
+		}
 	},
 }
 
@@ -32,7 +36,8 @@ var stackPool = sync.Pool{
 // expected to be changed and modified. stack does not take care of adding newly
 // initialized objects.
 type Stack struct {
-	data []uint256.Int
+	data   []uint256.Int
+	tracer []TracingUnit
 }
 
 func newstack() *Stack {
@@ -41,6 +46,7 @@ func newstack() *Stack {
 
 func returnStack(s *Stack) {
 	s.data = s.data[:0]
+	s.tracer = s.tracer[:0]
 	stackPool.Put(s)
 }
 
@@ -52,11 +58,14 @@ func (st *Stack) Data() []uint256.Int {
 func (st *Stack) push(d *uint256.Int) {
 	// NOTE push limit (1024) is checked in baseCheck
 	st.data = append(st.data, *d)
+	st.tracer = append(st.tracer, NewNormalUnit(*d))
 }
 
-func (st *Stack) pop() (ret uint256.Int) {
+func (st *Stack) pop() (ret uint256.Int, retUnit TracingUnit) {
 	ret = st.data[len(st.data)-1]
 	st.data = st.data[:len(st.data)-1]
+	retUnit = st.tracer[len(st.tracer)-1]
+	st.tracer = st.tracer[:len(st.tracer)-1]
 	return
 }
 
@@ -66,62 +75,105 @@ func (st *Stack) len() int {
 
 func (st *Stack) swap1() {
 	st.data[st.len()-2], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-2]
+	st.tracer[st.len()-2], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-2]
 }
 func (st *Stack) swap2() {
 	st.data[st.len()-3], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-3]
+	st.tracer[st.len()-3], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-3]
 }
 func (st *Stack) swap3() {
 	st.data[st.len()-4], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-4]
+	st.tracer[st.len()-4], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-4]
 }
 func (st *Stack) swap4() {
 	st.data[st.len()-5], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-5]
+	st.tracer[st.len()-5], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-5]
 }
 func (st *Stack) swap5() {
 	st.data[st.len()-6], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-6]
+	st.tracer[st.len()-6], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-6]
 }
 func (st *Stack) swap6() {
 	st.data[st.len()-7], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-7]
+	st.tracer[st.len()-7], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-7]
 }
 func (st *Stack) swap7() {
 	st.data[st.len()-8], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-8]
+	st.tracer[st.len()-8], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-8]
 }
 func (st *Stack) swap8() {
 	st.data[st.len()-9], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-9]
+	st.tracer[st.len()-9], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-9]
 }
 func (st *Stack) swap9() {
 	st.data[st.len()-10], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-10]
+	st.tracer[st.len()-10], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-10]
 }
 func (st *Stack) swap10() {
 	st.data[st.len()-11], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-11]
+	st.tracer[st.len()-11], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-11]
 }
 func (st *Stack) swap11() {
 	st.data[st.len()-12], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-12]
+	st.tracer[st.len()-12], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-12]
 }
 func (st *Stack) swap12() {
 	st.data[st.len()-13], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-13]
+	st.tracer[st.len()-13], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-13]
 }
 func (st *Stack) swap13() {
 	st.data[st.len()-14], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-14]
+	st.tracer[st.len()-14], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-14]
 }
 func (st *Stack) swap14() {
 	st.data[st.len()-15], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-15]
+	st.tracer[st.len()-15], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-15]
 }
 func (st *Stack) swap15() {
 	st.data[st.len()-16], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-16]
+	st.tracer[st.len()-16], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-16]
 }
 func (st *Stack) swap16() {
 	st.data[st.len()-17], st.data[st.len()-1] = st.data[st.len()-1], st.data[st.len()-17]
+	st.tracer[st.len()-17], st.tracer[st.len()-1] = st.tracer[st.len()-1], st.tracer[st.len()-17]
 }
 
 func (st *Stack) dup(n int) {
-	st.push(&st.data[st.len()-n])
+	st.data = append(st.data, st.data[len(st.data)-n])
+	st.tracer = append(st.tracer, st.tracer[len(st.tracer)-n].Copy())
 }
 
-func (st *Stack) peek() *uint256.Int {
-	return &st.data[st.len()-1]
+func (st *Stack) peek() (*uint256.Int, TracingUnit) {
+	return &st.data[st.len()-1], st.tracer[st.len()-1]
 }
 
 // Back returns the n'th item in stack
 func (st *Stack) Back(n int) *uint256.Int {
 	return &st.data[st.len()-n-1]
+}
+
+func (st *Stack) UpdatePeek(e uint256.Int) {
+	st.data[st.len()-1] = e
+	st.tracer[st.len()-1].SetValue(e)
+}
+
+func (st *Stack) updateUnit(t int, slot, offset, val, blockNum uint256.Int, blockEnv string, balAddr common.Address) {
+	switch t {
+	case INPUT:
+		st.tracer[st.len()-1] = NewCallDataUnit(val, offset)
+	case STATE:
+		st.tracer[st.len()-1] = NewStateUnit(slot, val, blockNum, blockEnv, balAddr)
+	default:
+	}
+}
+
+func (st *Stack) copy() *Stack {
+	stackCopy := stackPool.Get().(*Stack)
+	stackCopy.data = append(stackCopy.data, st.data...)
+	stackCopy.tracer = append(stackCopy.tracer, st.tracer...)
+	return stackCopy
+}
+
+func (st *Stack) override(tu TracingUnit) {
+	st.tracer[st.len()-1] = tu
 }

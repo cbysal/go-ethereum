@@ -19,17 +19,20 @@ package common
 import (
 	"bytes"
 	"database/sql/driver"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"math/big"
+	"math/bits"
 	"math/rand"
 	"reflect"
 	"strconv"
 	"strings"
 
 	"github.com/ethereum/go-ethereum/common/hexutil"
+	"github.com/holiman/uint256"
 	"golang.org/x/crypto/sha3"
 )
 
@@ -192,6 +195,34 @@ func (h *Hash) UnmarshalGraphQL(input interface{}) error {
 		err = fmt.Errorf("unexpected type %T for Hash", input)
 	}
 	return err
+}
+
+func AddHash(a, b Hash) Hash {
+	s0, c0 := bits.Add64(binary.BigEndian.Uint64(a[24:32]), binary.BigEndian.Uint64(b[24:32]), 0)
+	s1, c1 := bits.Add64(binary.BigEndian.Uint64(a[16:24]), binary.BigEndian.Uint64(b[16:24]), c0)
+	s2, c3 := bits.Add64(binary.BigEndian.Uint64(a[8:16]), binary.BigEndian.Uint64(b[8:16]), c1)
+	s4, _ := bits.Add64(binary.BigEndian.Uint64(a[0:8]), binary.BigEndian.Uint64(b[0:8]), c3)
+
+	var res Hash
+	binary.BigEndian.PutUint64(res[24:32], s0)
+	binary.BigEndian.PutUint64(res[16:24], s1)
+	binary.BigEndian.PutUint64(res[8:16], s2)
+	binary.BigEndian.PutUint64(res[0:8], s4)
+	return res
+}
+
+func SubHash(a, b Hash) Hash {
+	d0, b0 := bits.Sub64(binary.BigEndian.Uint64(a[24:32]), binary.BigEndian.Uint64(b[24:32]), 0)
+	d1, b1 := bits.Sub64(binary.BigEndian.Uint64(a[16:24]), binary.BigEndian.Uint64(b[16:24]), b0)
+	d2, b2 := bits.Sub64(binary.BigEndian.Uint64(a[8:16]), binary.BigEndian.Uint64(b[8:16]), b1)
+	d3, _ := bits.Sub64(binary.BigEndian.Uint64(a[0:8]), binary.BigEndian.Uint64(b[0:8]), b2)
+
+	var res Hash
+	binary.BigEndian.PutUint64(res[24:32], d0)
+	binary.BigEndian.PutUint64(res[16:24], d1)
+	binary.BigEndian.PutUint64(res[8:16], d2)
+	binary.BigEndian.PutUint64(res[0:8], d3)
+	return res
 }
 
 // UnprefixedHash allows marshaling a Hash without 0x prefix.
@@ -485,4 +516,19 @@ func (b PrettyBytes) TerminalString() string {
 		return fmt.Sprintf("%x", b)
 	}
 	return fmt.Sprintf("%#x...%x (%dB)", b[:3], b[len(b)-3:], len(b))
+}
+
+type Pair[T1 any, T2 any] struct {
+	First  T1
+	Second T2
+}
+
+type AddrHash struct {
+	Addr Address
+	Hash Hash
+}
+
+type AddrU256 struct {
+	Addr Address
+	U256 uint256.Int
 }
